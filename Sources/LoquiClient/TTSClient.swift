@@ -27,8 +27,7 @@ public class TTSClient {
     
     /// Stream TTS audio as raw PCM (s16le, 24kHz, mono)
     /// Returns an AsyncThrowingStream of Data chunks
-    /// If voice is nil, uses the server's default voice
-    public func streamSpeech(text: String, voice: String? = nil) -> AsyncThrowingStream<Data, Error> {
+    public func streamSpeech(text: String, voice: String = "alba") -> AsyncThrowingStream<Data, Error> {
         AsyncThrowingStream { continuation in
             Task {
                 do {
@@ -37,11 +36,7 @@ public class TTSClient {
                     request.httpMethod = "POST"
                     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     
-                    // Only include voice if explicitly specified
-                    var body: [String: String] = ["text": text]
-                    if let voice = voice {
-                        body["voice"] = voice
-                    }
+                    let body = ["text": text, "voice": voice]
                     request.httpBody = try JSONSerialization.data(withJSONObject: body)
                     
                     let (bytes, response) = try await URLSession.shared.bytes(for: request)
@@ -76,18 +71,13 @@ public class TTSClient {
     }
     
     /// Synthesize text and return complete audio data
-    /// If voice is nil, uses the server's default voice
-    public func synthesize(text: String, voice: String? = nil) async throws -> Data {
+    public func synthesize(text: String, voice: String = "alba") async throws -> Data {
         let url = baseURL.appendingPathComponent("stream")
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         
-        // Only include voice if explicitly specified
-        var body: [String: String] = ["text": text]
-        if let voice = voice {
-            body["voice"] = voice
-        }
+        let body = ["text": text, "voice": voice]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         
         let (data, response) = try await URLSession.shared.data(for: request)

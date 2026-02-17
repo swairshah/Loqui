@@ -13,7 +13,7 @@ import LoquiClient
 
 struct CLI {
     var text: String = ""
-    var voice: String? = nil  // nil = use server default
+    var voice: String = "alba"
     var port: Int = 18080
     var host: String = "127.0.0.1"
     var rawOutput: Bool = false
@@ -126,7 +126,7 @@ func findFFPlay() -> String? {
     return nil
 }
 
-func playWithFFPlay(client: TTSClient, text: String, voice: String?) async throws {
+func playWithFFPlay(client: TTSClient, text: String, voice: String) async throws {
     guard let ffplayPath = findFFPlay() else {
         FileHandle.standardError.write("Error: ffplay not found. Install ffmpeg or use --raw mode.\n".data(using: .utf8)!)
         exit(1)
@@ -161,7 +161,7 @@ func playWithFFPlay(client: TTSClient, text: String, voice: String?) async throw
     process.waitUntilExit()
 }
 
-func outputRaw(client: TTSClient, text: String, voice: String?) async throws {
+func outputRaw(client: TTSClient, text: String, voice: String) async throws {
     let stream = client.streamSpeech(text: text, voice: voice)
     
     for try await chunk in stream {
@@ -218,9 +218,9 @@ func main() async {
         exit(1)
     }
     
-    // Validate voice if specified
-    if let voice = cli.voice, !TTSClient.availableVoices.contains(voice) {
-        FileHandle.standardError.write("Warning: Unknown voice '\(voice)'\n".data(using: .utf8)!)
+    // Validate voice
+    if !TTSClient.availableVoices.contains(cli.voice) {
+        FileHandle.standardError.write("Warning: Unknown voice '\(cli.voice)'\n".data(using: .utf8)!)
     }
     
     // Check server health

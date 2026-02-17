@@ -363,6 +363,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let cacheDir = getModelCachePath()
         env["HF_HOME"] = cacheDir.path
         
+        // Set voices directory for local voice resolution
+        env["POCKET_TTS_VOICES_DIR"] = "\(resourcePath)/models/embeddings"
+        
         process.environment = env
         
         // Capture output for debugging

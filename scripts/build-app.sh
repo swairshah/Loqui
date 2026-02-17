@@ -15,8 +15,8 @@ swift build -c release --product Loqui
 swift build -c release --product ptts
 
 # Install Rust TTS server from crates.io
-echo "🦀 Installing pocket-tts-cli from crates.io..."
-cargo install pocket-tts-cli --locked
+echo "🦀 Installing pocket-tts-cli from GitHub fork..."
+cargo install --git https://github.com/swairshah/pocket-tts --bin pocket-tts-cli --force --no-default-features
 
 # Get the installed binary path
 POCKET_TTS_BIN=$(which pocket-tts-cli)
