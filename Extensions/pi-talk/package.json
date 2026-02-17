@@ -1,10 +1,11 @@
 {
   "name": "@swairshah/pi-talk",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "Text-to-speech extension for Pi coding agent using Loqui",
   "main": "index.ts",
   "type": "module",
   "keywords": [
+    "pi-package",
     "pi",
     "pi-extension",
     "tts",
@@ -27,6 +28,9 @@
     "index.ts",
     "README.md"
   ],
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": ">=0.1.0"
   }
