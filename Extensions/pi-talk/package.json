@@ -1,0 +1,33 @@
+{
+  "name": "@swairshah/pi-talk",
+  "version": "1.0.8",
+  "description": "Text-to-speech extension for Pi coding agent using Loqui",
+  "main": "index.ts",
+  "type": "module",
+  "keywords": [
+    "pi",
+    "pi-extension",
+    "tts",
+    "text-to-speech",
+    "loqui",
+    "voice"
+  ],
+  "author": "Swair Shah",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/swairshah/Loqui.git",
+    "directory": "Extensions/pi-talk"
+  },
+  "homepage": "https://github.com/swairshah/Loqui#readme",
+  "bugs": {
+    "url": "https://github.com/swairshah/Loqui/issues"
+  },
+  "files": [
+    "index.ts",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": ">=0.1.0"
+  }
+}

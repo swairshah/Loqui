@@ -1,10 +1,11 @@
 /**
- * Pi TTS Extension
+ * pi-talk - Text-to-speech extension for Pi
  *
  * Adds text-to-speech capabilities to Pi using <voice> tags.
  * Speaks only <voice> tagged content from assistant responses.
  *
- * Requires PocketTTS.app (TTS server at localhost:18080).
+ * Requires Loqui.app (TTS server at localhost:18080).
+ * Install with: brew install swairshah/tap/loqui
  *
  * Commands:
  *   /tts        - Toggle TTS on/off
@@ -15,7 +16,7 @@
  *   /tts-stop   - Stop current speech
  *   /tts-status - Show status
  *
- * Global shortcut (via PocketTTS.app): Cmd+Shift+. to stop speech
+ * Global shortcut (via Loqui.app): Cmd+. to stop speech
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
@@ -301,7 +302,7 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.setStatus("tts", "🔊");
       } else {
         if (!serverWarningShown) {
-          ctx.ui.notify("⚠️ TTS server not running (start Loqui.app)", "warning");
+          ctx.ui.notify("⚠️ TTS server not running. Start Loqui.app or install with: brew install swairshah/tap/loqui", "warning");
           serverWarningShown = true;
         }
         ctx.ui.setStatus("tts", "⚠️");
