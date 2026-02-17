@@ -58,6 +58,11 @@ cp Resources/icons/AppIcon.icns "$APP_DIR/Contents/Resources/"
 cp Resources/icons/menubar-running.png Resources/icons/menubar-running@2x.png "$APP_DIR/Contents/Resources/"
 cp Resources/icons/menubar-stopped.png Resources/icons/menubar-stopped@2x.png "$APP_DIR/Contents/Resources/"
 
+# Copy pocket-tts config files
+mkdir -p "$APP_DIR/Contents/Resources/config"
+cp Resources/config/*.yaml "$APP_DIR/Contents/Resources/config/"
+echo "  ✓ Config files bundled"
+
 
 
 # Create Info.plist
@@ -81,7 +86,7 @@ cat > "$APP_DIR/Contents/Info.plist" << 'EOF'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.1</string>
+    <string>1.0.2</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>LSMinimumSystemVersion</key>

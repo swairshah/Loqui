@@ -343,6 +343,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             "--voice", selectedVoice
         ]
         
+        // Set working directory to Resources so pocket-tts-cli can find config/
+        if let resourcePath = Bundle.main.resourcePath {
+            process.currentDirectoryURL = URL(fileURLWithPath: resourcePath)
+        }
+        
         // Set up environment
         var env = ProcessInfo.processInfo.environment
         
