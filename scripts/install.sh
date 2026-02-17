@@ -13,11 +13,12 @@ YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
-# Get script directory
+# Get project root (parent of scripts/)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-APP_PATH="$SCRIPT_DIR/.build/Loqui.app"
-EXTENSION_SRC="$SCRIPT_DIR/pi-tts-extension"
-CLI_SRC="$SCRIPT_DIR/.build/release/ptts"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+APP_PATH="$PROJECT_ROOT/.build/Loqui.app"
+EXTENSION_SRC="$PROJECT_ROOT/Extensions/pi"
+CLI_SRC="$PROJECT_ROOT/.build/release/ptts"
 
 # Check if running from the right directory
 if [ ! -d "$SCRIPT_DIR" ]; then
@@ -88,7 +89,7 @@ if [ -d "$APP_PATH" ]; then
     open "$INSTALLED_APP"
 else
     echo -e "  ${YELLOW}⚠${NC} App not found at $APP_PATH"
-    echo -e "  ${YELLOW}  Run ./build-app.sh first to build the app${NC}"
+    echo -e "  ${YELLOW}  Run ./scripts/build-app.sh first to build the app${NC}"
 fi
 
 # Step 5: Install ptts CLI
@@ -116,7 +117,7 @@ if [ -f "$CLI_SRC" ]; then
     fi
 else
     echo -e "  ${YELLOW}⚠${NC} CLI not found at $CLI_SRC"
-    echo -e "  ${YELLOW}  Run ./build-app.sh first to build${NC}"
+    echo -e "  ${YELLOW}  Run ./scripts/build-app.sh first to build${NC}"
 fi
 
 # Done

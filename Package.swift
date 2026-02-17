@@ -23,7 +23,7 @@ let package = Package(
         .executableTarget(
             name: "Loqui",
             dependencies: ["KeyboardShortcuts"],
-            path: "Loqui",
+            path: "Sources/Loqui",
             exclude: ["Info.plist", "Loqui.entitlements"]
         ),
         // CLI tool

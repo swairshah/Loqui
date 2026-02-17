@@ -1,14 +1,27 @@
 #!/bin/bash
 set -e
 
+# Change to project root (parent of scripts/)
+cd "$(dirname "$0")/.."
+
 # Release script for Loqui
-# Usage: ./release.sh 1.0.0
+# Usage: ./scripts/release.sh 1.0.0
+#
+# Prerequisites:
+#   Store your Apple ID credentials in keychain:
+#   xcrun notarytool store-credentials "AC_PASSWORD" \
+#     --apple-id "your@email.com" \
+#     --team-id "8B9YURJS4G" \
+#     --password "app-specific-password"
 
 VERSION=$1
+APPLE_ID="swairshah@gmail.com"
+TEAM_ID="8B9YURJS4G"
+KEYCHAIN_PROFILE="AC_PASSWORD"
 
 if [ -z "$VERSION" ]; then
-    echo "Usage: ./release.sh <version>"
-    echo "Example: ./release.sh 1.0.0"
+    echo "Usage: ./scripts/release.sh <version>"
+    echo "Example: ./scripts/release.sh 1.0.0"
     exit 1
 fi
 
@@ -17,19 +30,36 @@ echo ""
 
 # 1. Update version in build script
 echo "📝 Updating version in build-app.sh..."
-sed -i '' "s/CFBundleShortVersionString<\/key>.*<string>[^<]*<\/string>/CFBundleShortVersionString<\/key>\n    <string>${VERSION}<\/string>/" build-app.sh
+sed -i '' "s/<string>[0-9]*\.[0-9]*\.[0-9]*<\/string>/<string>${VERSION}<\/string>/g" scripts/build-app.sh
 
-# 2. Build
+# 2. Build (includes signing)
 echo "🔨 Building..."
-./build-app.sh
+./scripts/build-app.sh
 
-# 3. Create dist
+# 3. Create zip for notarization
 echo "📦 Creating distribution..."
 mkdir -p dist
 rm -f dist/Loqui-${VERSION}.zip dist/pi-extension-${VERSION}.zip
 
 ditto -c -k --keepParent .build/Loqui.app dist/Loqui-${VERSION}.zip
-zip -j dist/pi-extension-${VERSION}.zip pi-extension/index.ts
+
+# 4. Notarize
+echo "📤 Submitting for notarization..."
+xcrun notarytool submit dist/Loqui-${VERSION}.zip \
+    --keychain-profile "$KEYCHAIN_PROFILE" \
+    --wait
+
+# 5. Staple the app
+echo "📎 Stapling notarization ticket..."
+xcrun stapler staple .build/Loqui.app
+
+# 6. Re-create zip with stapled app
+echo "📦 Re-packaging with stapled ticket..."
+rm -f dist/Loqui-${VERSION}.zip
+ditto -c -k --keepParent .build/Loqui.app dist/Loqui-${VERSION}.zip
+
+# Also create pi-extension zip
+zip -j dist/pi-extension-${VERSION}.zip Extensions/pi/index.ts
 
 # 4. Calculate SHA
 echo ""

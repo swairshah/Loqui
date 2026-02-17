@@ -55,3 +55,6 @@ releases/
 *.dmg
 *.pkg
 *.zip
+
+# Distribution artifacts
+dist/

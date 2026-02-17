@@ -1,6 +1,9 @@
 #!/bin/bash
 set -e
 
+# Change to project root (parent of scripts/)
+cd "$(dirname "$0")/.."
+
 echo "🔨 Building Loqui.app..."
 
 # Build Swift app and CLI
@@ -36,7 +39,7 @@ cp .build/release/ptts "$APP_DIR/Contents/MacOS/"
 cp "$POCKET_TTS_BIN" "$APP_DIR/Contents/Resources/"
 
 # Bundle model files if present (optional - will download from HF if not bundled)
-MODELS_DIR="models"
+MODELS_DIR="Resources/models"
 if [ -d "$MODELS_DIR" ] && [ -f "$MODELS_DIR/tts_b6369a24.safetensors" ]; then
     echo "📦 Bundling model files..."
     cp "$MODELS_DIR/tts_b6369a24.safetensors" "$APP_DIR/Contents/Resources/models/" 2>/dev/null || true
@@ -49,11 +52,11 @@ else
 fi
 
 # Copy app icon
-cp AppIcon.icns "$APP_DIR/Contents/Resources/"
+cp Resources/icons/AppIcon.icns "$APP_DIR/Contents/Resources/"
 
-# Copy menubar icons from assets/
-cp assets/menubar-running.png assets/menubar-running@2x.png "$APP_DIR/Contents/Resources/"
-cp assets/menubar-stopped.png assets/menubar-stopped@2x.png "$APP_DIR/Contents/Resources/"
+# Copy menubar icons
+cp Resources/icons/menubar-running.png Resources/icons/menubar-running@2x.png "$APP_DIR/Contents/Resources/"
+cp Resources/icons/menubar-stopped.png Resources/icons/menubar-stopped@2x.png "$APP_DIR/Contents/Resources/"
 
 # Create Info.plist
 cat > "$APP_DIR/Contents/Info.plist" << 'EOF'
@@ -93,6 +96,19 @@ EOF
 
 # Create PkgInfo
 echo -n "APPL????" > "$APP_DIR/Contents/PkgInfo"
+
+# Code signing
+SIGNING_IDENTITY="Developer ID Application: Swair Rajesh Shah (8B9YURJS4G)"
+
+echo "🔏 Signing app..."
+# Sign the embedded binaries first
+codesign --force --options runtime --sign "$SIGNING_IDENTITY" "$APP_DIR/Contents/Resources/pocket-tts-cli"
+codesign --force --options runtime --sign "$SIGNING_IDENTITY" "$APP_DIR/Contents/MacOS/ptts"
+# Sign the main app
+codesign --force --options runtime --sign "$SIGNING_IDENTITY" "$APP_DIR"
+
+# Verify signature
+codesign --verify --deep --strict "$APP_DIR" && echo "  ✓ Signature valid" || echo "  ✗ Signature invalid"
 
 echo ""
 echo "✅ Built: $APP_DIR"
