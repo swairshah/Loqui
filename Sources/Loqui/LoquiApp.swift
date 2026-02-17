@@ -335,26 +335,26 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         setupBundledModelsCache()
         
         let process = Process()
-        process.executableURL = binaryPath
-        // Set working directory to Resources so pocket-tts-cli can find config/
-        var voicePath = selectedVoice
-        if let resourcePath = Bundle.main.resourcePath {
-            let resourceURL = URL(fileURLWithPath: resourcePath)
-            process.currentDirectoryURL = resourceURL
-            // Use local voice file path instead of voice name to avoid HuggingFace download
-            voicePath = "models/embeddings/\(selectedVoice).safetensors"
-            print("Loqui: Starting server with working directory: \(resourcePath)")
-            print("Loqui: Using voice: \(voicePath)")
-        } else {
-            print("Loqui: Warning - could not get resourcePath, server may fail to find config")
+        
+        // Use /bin/bash to ensure we cd into the right directory before running
+        // This is more reliable than Process.currentDirectoryURL
+        guard let resourcePath = Bundle.main.resourcePath else {
+            showAlert(title: "Resource Path Not Found",
+                     message: "Could not find app Resources directory.")
+            updateStatusIcon(running: false)
+            return
         }
         
+        let voicePath = "\(resourcePath)/models/embeddings/\(selectedVoice).safetensors"
+        
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
         process.arguments = [
-            "serve",
-            "--port", String(serverPort),
-            "--host", serverHost,
-            "--voice", voicePath
+            "-c",
+            "cd '\(resourcePath)' && ./pocket-tts-cli serve --port \(serverPort) --host \(serverHost) --voice '\(voicePath)'"
         ]
+        
+        print("Loqui: Starting server from: \(resourcePath)")
+        print("Loqui: Using voice: \(voicePath)")
         
         // Set up environment
         var env = ProcessInfo.processInfo.environment
