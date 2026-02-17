@@ -39,7 +39,7 @@ echo "🔨 Building..."
 # 3. Create zip for notarization
 echo "📦 Creating distribution..."
 mkdir -p dist
-rm -f dist/Loqui-${VERSION}.zip dist/pi-extension-${VERSION}.zip
+rm -f dist/Loqui-${VERSION}.zip dist/pi-talk-${VERSION}.zip
 
 ditto -c -k --keepParent .build/Loqui.app dist/Loqui-${VERSION}.zip
 
@@ -58,8 +58,8 @@ echo "📦 Re-packaging with stapled ticket..."
 rm -f dist/Loqui-${VERSION}.zip
 ditto -c -k --keepParent .build/Loqui.app dist/Loqui-${VERSION}.zip
 
-# Also create pi-extension zip
-zip -j dist/pi-extension-${VERSION}.zip Extensions/pi/index.ts
+# Also create pi-talk extension zip
+zip -j dist/pi-talk-${VERSION}.zip Extensions/pi-talk/index.ts Extensions/pi-talk/package.json Extensions/pi-talk/README.md
 
 # 4. Calculate SHA
 echo ""
@@ -89,7 +89,7 @@ echo "     git push origin v${VERSION}"
 echo ""
 echo "     gh release create v${VERSION} \\"
 echo "       dist/Loqui-${VERSION}.zip \\"
-echo "       dist/pi-extension-${VERSION}.zip \\"
+echo "       dist/pi-talk-${VERSION}.zip \\"
 echo "       --title \"Loqui v${VERSION}\" \\"
 echo "       --notes \"Release notes\""
 echo ""
