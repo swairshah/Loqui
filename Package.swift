@@ -11,7 +11,6 @@ let package = Package(
         .executable(name: "ptts", targets: ["ptts"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/sindresorhus/KeyboardShortcuts", from: "2.0.0")
     ],
     targets: [
         // Shared client library
@@ -22,7 +21,7 @@ let package = Package(
         // Main menubar app
         .executableTarget(
             name: "Loqui",
-            dependencies: ["KeyboardShortcuts"],
+            dependencies: [],
             path: "Sources/Loqui",
             exclude: ["Info.plist", "Loqui.entitlements"]
         ),

@@ -58,12 +58,7 @@ cp Resources/icons/AppIcon.icns "$APP_DIR/Contents/Resources/"
 cp Resources/icons/menubar-running.png Resources/icons/menubar-running@2x.png "$APP_DIR/Contents/Resources/"
 cp Resources/icons/menubar-stopped.png Resources/icons/menubar-stopped@2x.png "$APP_DIR/Contents/Resources/"
 
-# Copy KeyboardShortcuts resource bundle (required for localization)
-KEYBOARD_SHORTCUTS_BUNDLE=".build/arm64-apple-macosx/release/KeyboardShortcuts_KeyboardShortcuts.bundle"
-if [ -d "$KEYBOARD_SHORTCUTS_BUNDLE" ]; then
-    cp -R "$KEYBOARD_SHORTCUTS_BUNDLE" "$APP_DIR/Contents/Resources/"
-    echo "  ✓ KeyboardShortcuts resources bundled"
-fi
+
 
 # Create Info.plist
 cat > "$APP_DIR/Contents/Info.plist" << 'EOF'
@@ -86,7 +81,7 @@ cat > "$APP_DIR/Contents/Info.plist" << 'EOF'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
+    <string>1.0.1</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>LSMinimumSystemVersion</key>
@@ -111,10 +106,7 @@ echo "🔏 Signing app..."
 # Sign the embedded binaries first
 codesign --force --options runtime --sign "$SIGNING_IDENTITY" "$APP_DIR/Contents/Resources/pocket-tts-cli"
 codesign --force --options runtime --sign "$SIGNING_IDENTITY" "$APP_DIR/Contents/MacOS/ptts"
-# Sign resource bundles
-if [ -d "$APP_DIR/Contents/Resources/KeyboardShortcuts_KeyboardShortcuts.bundle" ]; then
-    codesign --force --options runtime --sign "$SIGNING_IDENTITY" "$APP_DIR/Contents/Resources/KeyboardShortcuts_KeyboardShortcuts.bundle"
-fi
+
 # Sign the main app
 codesign --force --options runtime --sign "$SIGNING_IDENTITY" "$APP_DIR"
 

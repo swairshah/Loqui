@@ -71,7 +71,7 @@ Commands in Pi:
 - `/tts-say <text>` - Speak arbitrary text
 - `/tts-stop` - Stop current speech
 
-Global shortcut: **Cmd+Shift+.** stops speech system-wide.
+Global shortcut: **Cmd+.** stops speech system-wide.
 
 ## Building from Source
 

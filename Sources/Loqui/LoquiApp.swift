@@ -1,11 +1,7 @@
 import SwiftUI
 import AppKit
 import ServiceManagement
-import KeyboardShortcuts
-
-extension KeyboardShortcuts.Name {
-    static let stopSpeech = Self("stopSpeech", default: .init(.period, modifiers: [.command, .shift]))
-}
+import Carbon.HIToolbox
 
 @main
 struct LoquiApp: App {
@@ -24,6 +20,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var serverProcess: Process?
     var isServerRunning = false
     var settingsWindow: NSWindow?
+    var hotKeyRef: EventHotKeyRef?
+    var eventHandler: EventHandlerRef?
     
     // Configuration
     let serverHost = "127.0.0.1"
@@ -80,6 +78,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     func applicationWillTerminate(_ notification: Notification) {
         stopServer()
+        if let hotKeyRef = hotKeyRef {
+            UnregisterEventHotKey(hotKeyRef)
+        }
+        if let eventHandler = eventHandler {
+            RemoveEventHandler(eventHandler)
+        }
     }
     
     // MARK: - Menu Bar
@@ -97,7 +101,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem.separator())
         
         let stopSpeechItem = NSMenuItem(title: "Stop Speech", action: #selector(stopCurrentSpeech), keyEquivalent: ".")
-        stopSpeechItem.keyEquivalentModifierMask = [.command, .shift]
+        stopSpeechItem.keyEquivalentModifierMask = [.command]
         menu.addItem(stopSpeechItem)
         
         menu.addItem(NSMenuItem.separator())
@@ -169,12 +173,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return nil
     }
     
-    // MARK: - Global Shortcut
+    // MARK: - Global Shortcut (Cmd+.)
     
     func setupGlobalShortcut() {
-        KeyboardShortcuts.onKeyUp(for: .stopSpeech) { [weak self] in
-            self?.stopCurrentSpeech()
+        // Use Carbon API for true global hotkey that works everywhere
+        var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        
+        let handler: EventHandlerUPP = { _, event, userData -> OSStatus in
+            guard let userData = userData else { return OSStatus(eventNotHandledErr) }
+            let appDelegate = Unmanaged<AppDelegate>.fromOpaque(userData).takeUnretainedValue()
+            appDelegate.stopCurrentSpeech()
+            return noErr
         }
+        
+        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
+        InstallEventHandler(GetApplicationEventTarget(), handler, 1, &eventType, selfPtr, &eventHandler)
+        
+        // Register Cmd+. hotkey
+        // Key code 47 = period (.)
+        let hotKeyID = EventHotKeyID(signature: OSType(0x4C4F5149), id: 1) // "LOQI"
+        let modifiers: UInt32 = UInt32(cmdKey)
+        RegisterEventHotKey(47, modifiers, hotKeyID, GetApplicationEventTarget(), 0, &hotKeyRef)
     }
     
     @objc func stopCurrentSpeech() {
@@ -533,7 +552,11 @@ struct GeneralSettingsView: View {
                 HStack {
                     Text("Stop Speech (Global)")
                     Spacer()
-                    KeyboardShortcuts.Recorder(for: .stopSpeech)
+                    Text("⌘.")
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.secondary.opacity(0.2))
+                        .cornerRadius(4)
                 }
             } header: {
                 Text("Shortcuts")
