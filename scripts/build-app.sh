@@ -48,8 +48,12 @@ if [ -d "$MODELS_DIR" ] && [ -f "$MODELS_DIR/tts_b6369a24.safetensors" ]; then
     echo "📦 Bundling model files..."
     cp "$MODELS_DIR/tts_b6369a24.safetensors" "$APP_DIR/Contents/Resources/models/" 2>/dev/null || true
     cp "$MODELS_DIR/tokenizer.model" "$APP_DIR/Contents/Resources/models/" 2>/dev/null || true
-    cp "$MODELS_DIR/fantine.safetensors" "$APP_DIR/Contents/Resources/models/" 2>/dev/null || true
-    cp "$MODELS_DIR/alba.safetensors" "$APP_DIR/Contents/Resources/models/" 2>/dev/null || true
+    # Copy voice embeddings
+    if [ -d "$MODELS_DIR/embeddings" ]; then
+        mkdir -p "$APP_DIR/Contents/Resources/models/embeddings"
+        cp "$MODELS_DIR/embeddings/"*.safetensors "$APP_DIR/Contents/Resources/models/embeddings/" 2>/dev/null || true
+        echo "  ✓ Voice embeddings bundled"
+    fi
     echo "  ✓ Model files bundled"
 else
     echo "📥 Models not bundled - will download from HuggingFace on first run"
