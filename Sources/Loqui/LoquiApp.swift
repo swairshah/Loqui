@@ -336,21 +336,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         let process = Process()
         process.executableURL = binaryPath
+        // Set working directory to Resources so pocket-tts-cli can find config/
+        var voicePath = selectedVoice
+        if let resourcePath = Bundle.main.resourcePath {
+            let resourceURL = URL(fileURLWithPath: resourcePath)
+            process.currentDirectoryURL = resourceURL
+            // Use local voice file path instead of voice name to avoid HuggingFace download
+            voicePath = "models/embeddings/\(selectedVoice).safetensors"
+            print("Loqui: Starting server with working directory: \(resourcePath)")
+            print("Loqui: Using voice: \(voicePath)")
+        } else {
+            print("Loqui: Warning - could not get resourcePath, server may fail to find config")
+        }
+        
         process.arguments = [
             "serve",
             "--port", String(serverPort),
             "--host", serverHost,
-            "--voice", selectedVoice
+            "--voice", voicePath
         ]
-        
-        // Set working directory to Resources so pocket-tts-cli can find config/
-        if let resourcePath = Bundle.main.resourcePath {
-            let resourceURL = URL(fileURLWithPath: resourcePath)
-            process.currentDirectoryURL = resourceURL
-            print("Loqui: Starting server with working directory: \(resourcePath)")
-        } else {
-            print("Loqui: Warning - could not get resourcePath, server may fail to find config")
-        }
         
         // Set up environment
         var env = ProcessInfo.processInfo.environment
