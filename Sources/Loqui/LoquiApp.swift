@@ -345,7 +345,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         // Set working directory to Resources so pocket-tts-cli can find config/
         if let resourcePath = Bundle.main.resourcePath {
-            process.currentDirectoryURL = URL(fileURLWithPath: resourcePath)
+            let resourceURL = URL(fileURLWithPath: resourcePath)
+            process.currentDirectoryURL = resourceURL
+            print("Loqui: Starting server with working directory: \(resourcePath)")
+        } else {
+            print("Loqui: Warning - could not get resourcePath, server may fail to find config")
         }
         
         // Set up environment
