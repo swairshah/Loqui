@@ -1,6 +1,6 @@
 {
   "name": "@swairshah/pi-talk",
-  "version": "1.0.9",
+  "version": "1.1.0",
   "description": "Text-to-speech extension for Pi coding agent using Loqui",
   "main": "index.ts",
   "type": "module",

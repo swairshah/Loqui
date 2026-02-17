@@ -262,8 +262,14 @@ export default function (pi: ExtensionAPI) {
   }
 
   // Process streaming text for voice tags
-  function processStreamingText(fullText: string) {
-    if (!ttsEnabled || !serverReady) return;
+  async function processStreamingText(fullText: string) {
+    if (!ttsEnabled) return;
+    
+    // Retry server check if not ready
+    if (!serverReady) {
+      await checkServer();
+      if (!serverReady) return;
+    }
 
     voiceBuffer = fullText;
     
