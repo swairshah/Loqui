@@ -1,0 +1,116 @@
+#!/bin/bash
+set -e
+
+echo "🔨 Building Loqui.app..."
+
+# Build Swift app and CLI
+swift build -c release --product Loqui
+swift build -c release --product ptts
+
+# Install Rust TTS server from crates.io
+echo "🦀 Installing pocket-tts-cli from crates.io..."
+cargo install pocket-tts-cli --locked
+
+# Get the installed binary path
+POCKET_TTS_BIN=$(which pocket-tts-cli)
+if [ -z "$POCKET_TTS_BIN" ]; then
+    echo "❌ Error: pocket-tts-cli not found after installation"
+    exit 1
+fi
+echo "  ✓ Found pocket-tts-cli at: $POCKET_TTS_BIN"
+
+# Create app bundle structure
+APP_DIR=".build/Loqui.app"
+rm -rf "$APP_DIR"
+mkdir -p "$APP_DIR/Contents/MacOS"
+mkdir -p "$APP_DIR/Contents/Resources"
+mkdir -p "$APP_DIR/Contents/Resources/models"
+
+# Copy Swift executable
+cp .build/release/Loqui "$APP_DIR/Contents/MacOS/"
+
+# Copy CLI tool
+cp .build/release/ptts "$APP_DIR/Contents/MacOS/"
+
+# Bundle the TTS server binary
+cp "$POCKET_TTS_BIN" "$APP_DIR/Contents/Resources/"
+
+# Bundle model files if present (optional - will download from HF if not bundled)
+MODELS_DIR="models"
+if [ -d "$MODELS_DIR" ] && [ -f "$MODELS_DIR/tts_b6369a24.safetensors" ]; then
+    echo "📦 Bundling model files..."
+    cp "$MODELS_DIR/tts_b6369a24.safetensors" "$APP_DIR/Contents/Resources/models/" 2>/dev/null || true
+    cp "$MODELS_DIR/tokenizer.model" "$APP_DIR/Contents/Resources/models/" 2>/dev/null || true
+    cp "$MODELS_DIR/fantine.safetensors" "$APP_DIR/Contents/Resources/models/" 2>/dev/null || true
+    cp "$MODELS_DIR/alba.safetensors" "$APP_DIR/Contents/Resources/models/" 2>/dev/null || true
+    echo "  ✓ Model files bundled"
+else
+    echo "📥 Models not bundled - will download from HuggingFace on first run"
+fi
+
+# Copy app icon
+cp AppIcon.icns "$APP_DIR/Contents/Resources/"
+
+# Copy menubar icons from assets/
+cp assets/menubar-running.png assets/menubar-running@2x.png "$APP_DIR/Contents/Resources/"
+cp assets/menubar-stopped.png assets/menubar-stopped@2x.png "$APP_DIR/Contents/Resources/"
+
+# Create Info.plist
+cat > "$APP_DIR/Contents/Info.plist" << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleExecutable</key>
+    <string>Loqui</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.loqui.app</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>Loqui</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright © 2026. All rights reserved.</string>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+</dict>
+</plist>
+EOF
+
+# Create PkgInfo
+echo -n "APPL????" > "$APP_DIR/Contents/PkgInfo"
+
+echo ""
+echo "✅ Built: $APP_DIR"
+echo "✅ Built: .build/release/ptts (CLI tool)"
+echo ""
+echo "To run the app:"
+echo "  open $APP_DIR"
+echo ""
+echo "To install the CLI:"
+echo "  sudo cp .build/release/ptts /usr/local/bin/"
+echo ""
+
+APP_SIZE=$(du -sh "$APP_DIR" | cut -f1)
+echo "📦 App size: $APP_SIZE"
+
+if [ -d "$MODELS_DIR" ] && [ -f "$MODELS_DIR/tts_b6369a24.safetensors" ]; then
+    echo "   Models bundled - no HuggingFace token required!"
+else
+    echo "   Models will download from HuggingFace on first run."
+    echo "   Make sure HF_TOKEN is set in your environment."
+fi
