@@ -6,6 +6,10 @@ cd "$(dirname "$0")/.."
 
 echo "🔨 Building Loqui.app..."
 
+# Ensure Git LFS files are pulled (models are stored in LFS)
+echo "📥 Pulling Git LFS files..."
+git lfs pull
+
 # Build Swift app and CLI
 swift build -c release --product Loqui
 swift build -c release --product ptts
@@ -86,7 +90,7 @@ cat > "$APP_DIR/Contents/Info.plist" << 'EOF'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.3</string>
+    <string>1.0.4</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>LSMinimumSystemVersion</key>
