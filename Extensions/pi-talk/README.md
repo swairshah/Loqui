@@ -2,9 +2,18 @@
 
 Text-to-speech extension for [Pi coding agent](https://github.com/mariozechner/pi-coding-agent). Gives Pi a voice using `<voice>` tags.
 
+![pi-talk demo](https://raw.githubusercontent.com/swairshah/Loqui/main/assets/demo.gif)
+
+## Features
+
+- 🔊 **Local TTS** - No cloud APIs, runs entirely on your Mac
+- 🎭 **Multiple voices** - 7 different voice options
+- 🧠 **Central playback** - Pi sends speech jobs to Loqui's local broker queue
+- 🎛️ **Configurable** - Toggle verbosity, mute, change voices
+
 ## Requirements
 
-**Loqui.app** must be installed and running (provides the TTS server).
+**Loqui.app** must be installed and running (provides the TTS server + local broker queue).
 
 ```bash
 brew install swairshah/tap/loqui
@@ -42,7 +51,8 @@ Press **Cmd+.** to stop speech at any time (requires Loqui.app running).
 
 1. The extension injects a system prompt that teaches Pi to use `<voice>` tags
 2. When Pi responds, the extension extracts `<voice>` content
-3. Audio is streamed from Loqui's local TTS server (no cloud, no API keys)
+3. The extension sends speech jobs to Loqui's local broker (`127.0.0.1:18081`)
+4. Loqui synthesizes and plays audio centrally (no cloud, no API keys)
 
 ## Credits
 

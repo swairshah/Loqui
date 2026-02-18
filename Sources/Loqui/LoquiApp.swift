@@ -2,6 +2,8 @@ import SwiftUI
 import AppKit
 import ServiceManagement
 import Carbon.HIToolbox
+import Network
+import Darwin
 
 @main
 struct LoquiApp: App {
@@ -22,6 +24,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var settingsWindow: NSWindow?
     var hotKeyRef: EventHotKeyRef?
     var eventHandler: EventHandlerRef?
+    var speechCoordinator: SpeechPlaybackCoordinator?
+    var localBroker: LocalSpeechBroker?
+    let brokerPort = 18081
     
     // Configuration
     let serverHost = "127.0.0.1"
@@ -55,6 +60,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         setupMenuBar()
         setupGlobalShortcut()
         updateDockIconVisibility()
+
+        speechCoordinator = SpeechPlaybackCoordinator(
+            hostProvider: { [weak self] in self?.serverHost ?? "127.0.0.1" },
+            portProvider: { [weak self] in self?.serverPort ?? 18080 },
+            defaultVoiceProvider: { [weak self] in self?.selectedVoice ?? "fantine" }
+        )
+        startLocalBroker()
         startServer()
     }
     
@@ -77,6 +89,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func applicationWillTerminate(_ notification: Notification) {
+        localBroker?.stop()
+        speechCoordinator?.stopAll()
         stopServer()
         if let hotKeyRef = hotKeyRef {
             UnregisterEventHotKey(hotKeyRef)
@@ -195,22 +209,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let modifiers: UInt32 = UInt32(cmdKey)
         RegisterEventHotKey(47, modifiers, hotKeyID, GetApplicationEventTarget(), 0, &hotKeyRef)
     }
+
+    func startLocalBroker() {
+        guard let coordinator = speechCoordinator else { return }
+        do {
+            let broker = try LocalSpeechBroker(port: brokerPort, coordinator: coordinator)
+            broker.start()
+            localBroker = broker
+            print("Loqui: Local broker listening on 127.0.0.1:\(brokerPort)")
+        } catch {
+            print("Loqui: Failed to start local broker: \(error)")
+        }
+    }
     
     @objc func stopCurrentSpeech() {
-        // Kill any ffplay processes (the audio player)
-        let killTask = Process()
-        killTask.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        killTask.arguments = ["-9", "ffplay"]
-        try? killTask.run()
-        
-        // Also send stop signal to server if it has that endpoint
-        Task {
-            do {
-                var request = URLRequest(url: URL(string: "http://\(serverHost):\(serverPort)/stop")!)
-                request.httpMethod = "POST"
-                _ = try? await URLSession.shared.data(for: request)
-            }
-        }
+        // Centralized stop: clear broker queue, stop active Loqui playback, stop current synth request.
+        speechCoordinator?.stopAll()
     }
     
     // MARK: - Server Management
@@ -324,7 +338,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func startServer() {
-        guard let binaryPath = getServerBinaryPath() else {
+        guard getServerBinaryPath() != nil else {
             showAlert(title: "Server Binary Not Found", 
                      message: "Could not find pocket-tts-cli. Please ensure it's installed or bundled with the app.")
             updateStatusIcon(running: false)
@@ -478,6 +492,595 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+// MARK: - Local Broker & Playback
+
+private struct SpeechJob {
+    let historyEntryId: UUID
+    let text: String
+    let voice: String
+    let sourceApp: String?
+    let sessionId: String?
+    let pid: Int?
+}
+
+private struct BrokerRequest: Decodable {
+    let type: String
+    let text: String?
+    let voice: String?
+    let sourceApp: String?
+    let sessionId: String?
+    let pid: Int?
+}
+
+private struct BrokerResponse: Encodable {
+    let ok: Bool
+    let error: String?
+    let queued: Int?
+    let pending: Int?
+    let playing: Bool?
+
+    static func success(queued: Int? = nil, pending: Int? = nil, playing: Bool? = nil) -> BrokerResponse {
+        BrokerResponse(ok: true, error: nil, queued: queued, pending: pending, playing: playing)
+    }
+
+    static func failure(_ message: String) -> BrokerResponse {
+        BrokerResponse(ok: false, error: message, queued: nil, pending: nil, playing: nil)
+    }
+}
+
+enum RequestPlaybackStatus: String, Codable {
+    case queued
+    case playing
+    case played
+    case interrupted
+    case cancelled
+    case failed
+
+    var displayName: String {
+        switch self {
+        case .queued: return "Queued"
+        case .playing: return "Playing"
+        case .played: return "Played"
+        case .interrupted: return "Interrupted"
+        case .cancelled: return "Cancelled"
+        case .failed: return "Failed"
+        }
+    }
+
+    var isInQueue: Bool {
+        self == .queued || self == .playing
+    }
+
+    var tintColor: Color {
+        switch self {
+        case .queued: return .secondary
+        case .playing: return .blue
+        case .played: return .green
+        case .interrupted: return .orange
+        case .cancelled: return .orange
+        case .failed: return .red
+        }
+    }
+}
+
+struct RequestHistoryEntry: Identifiable, Codable {
+    let id: UUID
+    let timestamp: Date
+    let text: String
+    let voice: String?
+    let sourceApp: String?
+    let sessionId: String?
+    let pid: Int?
+    var status: RequestPlaybackStatus
+
+    init(
+        id: UUID = UUID(),
+        timestamp: Date,
+        text: String,
+        voice: String?,
+        sourceApp: String?,
+        sessionId: String?,
+        pid: Int?,
+        status: RequestPlaybackStatus
+    ) {
+        self.id = id
+        self.timestamp = timestamp
+        self.text = text
+        self.voice = voice
+        self.sourceApp = sourceApp
+        self.sessionId = sessionId
+        self.pid = pid
+        self.status = status
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, timestamp, text, voice, sourceApp, sessionId, pid, status
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        timestamp = try container.decode(Date.self, forKey: .timestamp)
+        text = try container.decode(String.self, forKey: .text)
+        voice = try container.decodeIfPresent(String.self, forKey: .voice)
+        sourceApp = try container.decodeIfPresent(String.self, forKey: .sourceApp)
+        sessionId = try container.decodeIfPresent(String.self, forKey: .sessionId)
+        pid = try container.decodeIfPresent(Int.self, forKey: .pid)
+        // Backward compatibility: old entries had no status, treat as already played
+        status = try container.decodeIfPresent(RequestPlaybackStatus.self, forKey: .status) ?? .played
+    }
+}
+
+final class RequestHistoryStore: ObservableObject {
+    static let shared = RequestHistoryStore()
+
+    @Published private(set) var entries: [RequestHistoryEntry] = []
+    private let maxEntries = 250
+    private let historyFileURL: URL
+
+    private init() {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let loquiDir = appSupport.appendingPathComponent("Loqui", isDirectory: true)
+        historyFileURL = loquiDir.appendingPathComponent("request-history.json")
+        _ = syncOnMain { () -> Bool in
+            loadFromDisk()
+            return true
+        }
+    }
+
+    @discardableResult
+    func add(text: String, voice: String?, sourceApp: String?, sessionId: String?, pid: Int?) -> UUID {
+        let entry = RequestHistoryEntry(
+            timestamp: Date(),
+            text: text,
+            voice: voice,
+            sourceApp: sourceApp,
+            sessionId: sessionId,
+            pid: pid,
+            status: .queued
+        )
+
+        _ = syncOnMain { () -> Bool in
+            entries.insert(entry, at: 0)
+            if entries.count > maxEntries {
+                entries.removeLast(entries.count - maxEntries)
+            }
+            persist()
+            return true
+        }
+
+        return entry.id
+    }
+
+    func updateStatus(
+        id: UUID,
+        to newStatus: RequestPlaybackStatus,
+        unlessCurrentIn blockedStatuses: Set<RequestPlaybackStatus> = []
+    ) {
+        _ = syncOnMain { () -> Bool in
+            guard let index = entries.firstIndex(where: { $0.id == id }) else {
+                return false
+            }
+
+            let current = entries[index].status
+            if blockedStatuses.contains(current) {
+                return false
+            }
+
+            if current != newStatus {
+                entries[index].status = newStatus
+                persist()
+            }
+            return true
+        }
+    }
+
+    func clear() {
+        _ = syncOnMain { () -> Bool in
+            entries.removeAll()
+            persist()
+            return true
+        }
+    }
+
+    private func syncOnMain<T>(_ work: () -> T) -> T {
+        if Thread.isMainThread {
+            return work()
+        }
+
+        return DispatchQueue.main.sync(execute: work)
+    }
+
+    private func loadFromDisk() {
+        guard FileManager.default.fileExists(atPath: historyFileURL.path) else { return }
+
+        do {
+            let data = try Data(contentsOf: historyFileURL)
+            let decoded = try JSONDecoder().decode([RequestHistoryEntry].self, from: data)
+            entries = Array(decoded.prefix(maxEntries))
+        } catch {
+            print("Loqui: Failed to load request history: \(error)")
+        }
+    }
+
+    private func persist() {
+        do {
+            let directory = historyFileURL.deletingLastPathComponent()
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let data = try JSONEncoder().encode(entries)
+            try data.write(to: historyFileURL, options: [.atomic])
+        } catch {
+            print("Loqui: Failed to persist request history: \(error)")
+        }
+    }
+}
+
+final class SpeechPlaybackCoordinator {
+    private let queue = DispatchQueue(label: "loqui.playback.coordinator")
+    private var pendingJobs: [SpeechJob] = []
+    private var isPlaying = false
+    private var currentProcess: Process?
+    private var currentJobHistoryId: UUID?
+
+    private let hostProvider: () -> String
+    private let portProvider: () -> Int
+    private let defaultVoiceProvider: () -> String
+
+    init(hostProvider: @escaping () -> String,
+         portProvider: @escaping () -> Int,
+         defaultVoiceProvider: @escaping () -> String) {
+        self.hostProvider = hostProvider
+        self.portProvider = portProvider
+        self.defaultVoiceProvider = defaultVoiceProvider
+    }
+
+    func enqueue(text: String,
+                 voice: String?,
+                 sourceApp: String?,
+                 sessionId: String?,
+                 pid: Int?) -> Int {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return state().pending
+        }
+
+        let resolvedVoice = (voice?.isEmpty == false ? voice! : defaultVoiceProvider())
+
+        let historyEntryId = RequestHistoryStore.shared.add(
+            text: trimmed,
+            voice: resolvedVoice,
+            sourceApp: sourceApp,
+            sessionId: sessionId,
+            pid: pid
+        )
+
+        let job = SpeechJob(
+            historyEntryId: historyEntryId,
+            text: trimmed,
+            voice: resolvedVoice,
+            sourceApp: sourceApp,
+            sessionId: sessionId,
+            pid: pid
+        )
+
+        return queue.sync {
+            pendingJobs.append(job)
+            startNextIfNeededLocked()
+            return pendingJobs.count + (isPlaying ? 1 : 0)
+        }
+    }
+
+    func state() -> (pending: Int, playing: Bool) {
+        queue.sync {
+            (pendingJobs.count + (isPlaying ? 1 : 0), isPlaying)
+        }
+    }
+
+    func stopAll() {
+        let state = queue.sync { () -> (pending: [UUID], active: UUID?) in
+            let pendingIds = self.pendingJobs.map(\.historyEntryId)
+            let activeId = self.currentJobHistoryId
+
+            self.pendingJobs.removeAll()
+            self.terminateCurrentProcessLocked()
+            self.currentJobHistoryId = nil
+            self.isPlaying = false
+
+            return (pending: pendingIds, active: activeId)
+        }
+
+        for id in state.pending {
+            RequestHistoryStore.shared.updateStatus(id: id, to: .cancelled)
+        }
+
+        if let activeId = state.active {
+            RequestHistoryStore.shared.updateStatus(id: activeId, to: .interrupted)
+        }
+
+        Task {
+            await self.sendStopToServer()
+        }
+    }
+
+    private func startNextIfNeededLocked() {
+        guard !isPlaying, !pendingJobs.isEmpty else { return }
+        let job = pendingJobs.removeFirst()
+        isPlaying = true
+        currentJobHistoryId = job.historyEntryId
+        RequestHistoryStore.shared.updateStatus(
+            id: job.historyEntryId,
+            to: .playing,
+            unlessCurrentIn: [.cancelled, .interrupted]
+        )
+
+        Task { [weak self] in
+            await self?.process(job: job)
+        }
+    }
+
+    private func finishCurrent() {
+        queue.async {
+            self.currentProcess = nil
+            self.currentJobHistoryId = nil
+            self.isPlaying = false
+            self.startNextIfNeededLocked()
+        }
+    }
+
+    private func process(job: SpeechJob) async {
+        var finalStatus: RequestPlaybackStatus = .played
+
+        do {
+            let audioData = try await synthesize(job: job)
+            try await play(audioData: audioData)
+        } catch {
+            finalStatus = .failed
+            print("Loqui: Playback error: \(error.localizedDescription)")
+        }
+
+        RequestHistoryStore.shared.updateStatus(
+            id: job.historyEntryId,
+            to: finalStatus,
+            unlessCurrentIn: [.cancelled, .interrupted]
+        )
+
+        finishCurrent()
+    }
+
+    private func synthesize(job: SpeechJob) async throws -> Data {
+        let url = URL(string: "http://\(hostProvider()):\(portProvider())/stream")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 30
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let body = ["text": job.text, "voice": job.voice]
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse,
+              httpResponse.statusCode == 200 else {
+            throw NSError(domain: "Loqui", code: 500, userInfo: [NSLocalizedDescriptionKey: "Failed to synthesize speech"])
+        }
+
+        return data
+    }
+
+    private func play(audioData: Data) async throws {
+        guard let ffplayPath = findFFPlayPath() else {
+            throw NSError(domain: "Loqui", code: 404, userInfo: [NSLocalizedDescriptionKey: "ffplay not found"])
+        }
+
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("loqui-\(UUID().uuidString).raw")
+        try audioData.write(to: tempURL)
+
+        defer {
+            try? FileManager.default.removeItem(at: tempURL)
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: ffplayPath)
+        process.arguments = [
+            "-f", "s16le",
+            "-ar", "24000",
+            "-ch_layout", "mono",
+            "-nodisp",
+            "-autoexit",
+            "-loglevel", "quiet",
+            tempURL.path
+        ]
+
+        try process.run()
+
+        queue.sync {
+            self.currentProcess = process
+        }
+
+        await withCheckedContinuation { continuation in
+            process.terminationHandler = { _ in
+                continuation.resume()
+            }
+        }
+    }
+
+    private func findFFPlayPath() -> String? {
+        let paths = [
+            "/opt/homebrew/bin/ffplay",
+            "/usr/local/bin/ffplay",
+            "/usr/bin/ffplay"
+        ]
+
+        for path in paths where FileManager.default.fileExists(atPath: path) {
+            return path
+        }
+
+        return nil
+    }
+
+    private func terminateCurrentProcessLocked() {
+        guard let process = currentProcess else { return }
+
+        if process.isRunning {
+            process.terminate()
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.25) {
+                if process.isRunning {
+                    kill(process.processIdentifier, SIGKILL)
+                }
+            }
+        }
+
+        currentProcess = nil
+    }
+
+    private func sendStopToServer() async {
+        let stopURL = URL(string: "http://\(hostProvider()):\(portProvider())/stop")!
+        var request = URLRequest(url: stopURL)
+        request.httpMethod = "POST"
+        _ = try? await URLSession.shared.data(for: request)
+    }
+}
+
+final class LocalSpeechBroker {
+    private let listener: NWListener
+    private let queue = DispatchQueue(label: "loqui.local.broker")
+    private let encoder = JSONEncoder()
+    private let decoder = JSONDecoder()
+    private let coordinator: SpeechPlaybackCoordinator
+
+    init(port: Int, coordinator: SpeechPlaybackCoordinator) throws {
+        guard let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else {
+            throw NSError(domain: "Loqui", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid broker port: \(port)"])
+        }
+
+        self.listener = try NWListener(using: .tcp, on: nwPort)
+        self.coordinator = coordinator
+    }
+
+    func start() {
+        listener.newConnectionHandler = { [weak self] connection in
+            self?.handle(connection: connection)
+        }
+
+        listener.stateUpdateHandler = { state in
+            switch state {
+            case .ready:
+                break
+            case .failed(let error):
+                print("Loqui: Broker failed: \(error)")
+            default:
+                break
+            }
+        }
+
+        listener.start(queue: queue)
+    }
+
+    func stop() {
+        listener.cancel()
+    }
+
+    private func handle(connection: NWConnection) {
+        connection.start(queue: queue)
+        receive(on: connection, buffer: Data())
+    }
+
+    private func receive(on connection: NWConnection, buffer: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
+            guard let self else {
+                connection.cancel()
+                return
+            }
+
+            if let error {
+                self.send(response: .failure("Connection error: \(error.localizedDescription)"), on: connection)
+                return
+            }
+
+            var newBuffer = buffer
+            if let data {
+                newBuffer.append(data)
+            }
+
+            if let range = newBuffer.range(of: Data([0x0A])) {
+                let line = newBuffer.subdata(in: 0..<range.lowerBound)
+                self.handleLine(line, on: connection)
+                return
+            }
+
+            if isComplete {
+                self.handleLine(newBuffer, on: connection)
+                return
+            }
+
+            self.receive(on: connection, buffer: newBuffer)
+        }
+    }
+
+    private func handleLine(_ line: Data, on connection: NWConnection) {
+        guard !line.isEmpty else {
+            send(response: .failure("Empty request"), on: connection)
+            return
+        }
+
+        let request: BrokerRequest
+        do {
+            request = try decoder.decode(BrokerRequest.self, from: line)
+        } catch {
+            send(response: .failure("Invalid JSON request"), on: connection)
+            return
+        }
+
+        switch request.type {
+        case "health":
+            let state = coordinator.state()
+            send(response: .success(pending: state.pending, playing: state.playing), on: connection)
+
+        case "speak":
+            guard let text = request.text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                send(response: .failure("Missing text"), on: connection)
+                return
+            }
+
+            let queued = coordinator.enqueue(
+                text: text,
+                voice: request.voice,
+                sourceApp: request.sourceApp,
+                sessionId: request.sessionId,
+                pid: request.pid
+            )
+            send(response: .success(queued: queued), on: connection)
+
+        case "stop":
+            coordinator.stopAll()
+            let state = coordinator.state()
+            send(response: .success(pending: state.pending, playing: state.playing), on: connection)
+
+        default:
+            send(response: .failure("Unknown command: \(request.type)"), on: connection)
+        }
+    }
+
+    private func send(response: BrokerResponse, on connection: NWConnection) {
+        let payload: Data
+        do {
+            var data = try encoder.encode(response)
+            data.append(0x0A)
+            payload = data
+        } catch {
+            let fallback = "{\"ok\":false,\"error\":\"Encoding failed\"}\n"
+            connection.send(content: fallback.data(using: .utf8), completion: .contentProcessed { _ in
+                connection.cancel()
+            })
+            return
+        }
+
+        connection.send(content: payload, completion: .contentProcessed { _ in
+            connection.cancel()
+        })
+    }
+}
+
 // MARK: - Settings View
 
 struct SettingsView: View {
@@ -486,6 +1089,11 @@ struct SettingsView: View {
             GeneralSettingsView()
                 .tabItem {
                     Label("General", systemImage: "gear")
+                }
+
+            HistoryView()
+                .tabItem {
+                    Label("History", systemImage: "clock.arrow.circlepath")
                 }
             
             HelpView()
@@ -669,6 +1277,231 @@ struct GeneralSettingsView: View {
     }
 }
 
+struct HistoryView: View {
+    @StateObject private var historyStore = RequestHistoryStore.shared
+    @State private var selectedAppFilter = Self.allAppsToken
+    @State private var selectedSessionFilter = Self.allSessionsToken
+
+    private static let allAppsToken = "__all_apps__"
+    private static let allSessionsToken = "__all_sessions__"
+    private static let noSessionToken = "__no_session__"
+
+    private static let timestampFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .none
+        formatter.timeStyle = .medium
+        return formatter
+    }()
+
+    private var appFilterOptions: [String] {
+        let apps = Set(historyStore.entries.map { normalizedAppName($0.sourceApp) }).sorted()
+        return [Self.allAppsToken] + apps
+    }
+
+    private var sessionFilterOptions: [String] {
+        let sessions = Set(historyStore.entries.compactMap { normalizedSessionId($0.sessionId) }).sorted()
+        var options = [Self.allSessionsToken]
+        if historyStore.entries.contains(where: { normalizedSessionId($0.sessionId) == nil }) {
+            options.append(Self.noSessionToken)
+        }
+        options.append(contentsOf: sessions)
+        return options
+    }
+
+    private var isFiltering: Bool {
+        selectedAppFilter != Self.allAppsToken || selectedSessionFilter != Self.allSessionsToken
+    }
+
+    private var filteredEntries: [RequestHistoryEntry] {
+        historyStore.entries.filter { entry in
+            if selectedAppFilter != Self.allAppsToken,
+               normalizedAppName(entry.sourceApp) != selectedAppFilter {
+                return false
+            }
+
+            if selectedSessionFilter == Self.noSessionToken {
+                return normalizedSessionId(entry.sessionId) == nil
+            }
+
+            if selectedSessionFilter != Self.allSessionsToken,
+               normalizedSessionId(entry.sessionId) != selectedSessionFilter {
+                return false
+            }
+
+            return true
+        }
+    }
+
+    private var queueEntries: [RequestHistoryEntry] {
+        filteredEntries
+            .filter { $0.status.isInQueue }
+            .sorted { $0.timestamp < $1.timestamp }
+    }
+
+    private var completedEntries: [RequestHistoryEntry] {
+        filteredEntries.filter { !$0.status.isInQueue }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Request History")
+                        .font(.headline)
+                    Text("Queue: \(queueEntries.count) · Completed: \(completedEntries.count)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                if isFiltering {
+                    Button("Reset Filters") {
+                        selectedAppFilter = Self.allAppsToken
+                        selectedSessionFilter = Self.allSessionsToken
+                    }
+                }
+                Button("Clear") {
+                    historyStore.clear()
+                }
+                .disabled(historyStore.entries.isEmpty)
+            }
+
+            HStack(spacing: 10) {
+                Picker("App", selection: $selectedAppFilter) {
+                    ForEach(appFilterOptions, id: \.self) { option in
+                        Text(appFilterLabel(option)).tag(option)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                Picker("Session", selection: $selectedSessionFilter) {
+                    ForEach(sessionFilterOptions, id: \.self) { option in
+                        Text(sessionFilterLabel(option)).tag(option)
+                    }
+                }
+                .pickerStyle(.menu)
+            }
+
+            if historyStore.entries.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("No requests yet")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                    Text("Requests sent through Loqui's local broker will appear here.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+            } else if filteredEntries.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("No matches for current filters")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                    Text("Try a different app/session filter or reset filters.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+            } else {
+                List {
+                    if !queueEntries.isEmpty {
+                        Section("Queue") {
+                            ForEach(queueEntries) { entry in
+                                entryRow(entry)
+                            }
+                        }
+                    }
+
+                    Section("History") {
+                        if completedEntries.isEmpty {
+                            Text("No completed requests yet")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        } else {
+                            ForEach(completedEntries) { entry in
+                                entryRow(entry)
+                            }
+                        }
+                    }
+                }
+                .listStyle(.inset)
+            }
+        }
+        .padding()
+    }
+
+    private func normalizedAppName(_ sourceApp: String?) -> String {
+        let trimmed = sourceApp?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (trimmed?.isEmpty == false) ? trimmed! : "Unknown app"
+    }
+
+    private func normalizedSessionId(_ sessionId: String?) -> String? {
+        let trimmed = sessionId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (trimmed?.isEmpty == false) ? trimmed : nil
+    }
+
+    private func appFilterLabel(_ option: String) -> String {
+        option == Self.allAppsToken ? "All apps" : option
+    }
+
+    private func sessionFilterLabel(_ option: String) -> String {
+        if option == Self.allSessionsToken { return "All sessions" }
+        if option == Self.noSessionToken { return "No session" }
+        return "\(String(option.prefix(8)))…"
+    }
+
+    @ViewBuilder
+    private func entryRow(_ entry: RequestHistoryEntry) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(normalizedAppName(entry.sourceApp))
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+
+                statusBadge(for: entry.status)
+
+                Spacer()
+                Text(Self.timestampFormatter.string(from: entry.timestamp))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Text(entry.text)
+                .font(.system(.caption, design: .monospaced))
+                .lineLimit(4)
+
+            HStack(spacing: 10) {
+                if let voice = entry.voice, !voice.isEmpty {
+                    Text("Voice: \(voice)")
+                }
+                if let pid = entry.pid {
+                    Text("PID: \(pid)")
+                }
+                if let sessionId = normalizedSessionId(entry.sessionId) {
+                    Text("Session: \(String(sessionId.prefix(8)))")
+                }
+                if entry.status == .interrupted {
+                    Text("Stopped via ⌘.")
+                        .foregroundColor(.orange)
+                }
+            }
+            .font(.caption2)
+            .foregroundColor(.secondary)
+        }
+        .padding(.vertical, 2)
+    }
+
+    @ViewBuilder
+    private func statusBadge(for status: RequestPlaybackStatus) -> some View {
+        Text(status.displayName)
+            .font(.caption2)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(status.tintColor.opacity(0.18))
+            .foregroundColor(status.tintColor)
+            .cornerRadius(6)
+    }
+}
+
 struct HelpView: View {
     var body: some View {
         ScrollView {
@@ -706,6 +1539,15 @@ struct HelpView: View {
                         .foregroundColor(.secondary)
                     
                     codeRow("{\"text\": \"Hello\", \"voice\": \"fantine\"}")
+                }
+
+                Group {
+                    Text("Local Broker Queue")
+                        .font(.headline)
+                    Text("TCP 127.0.0.1:18081 (NDJSON)")
+                        .foregroundColor(.secondary)
+
+                    codeRow("{\"type\":\"speak\",\"text\":\"Hello\",\"voice\":\"fantine\"}")
                 }
                 
                 Divider()

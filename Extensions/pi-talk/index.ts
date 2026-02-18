@@ -20,11 +20,13 @@
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { spawn, type ChildProcess } from "node:child_process";
+import net from "node:net";
+import process from "node:process";
 
-// Configuration - matches PocketTTS.app defaults
+// Configuration - matches Loqui defaults
 const TTS_PORT = 18080;
 const TTS_HOST = "127.0.0.1";
+const BROKER_PORT = 18081;
 const DEFAULT_VOICE = "fantine";
 const AVAILABLE_VOICES = ["alba", "marius", "javert", "fantine", "cosette", "eponine", "azelma"];
 
@@ -80,6 +82,23 @@ The text outside <voice> tags shows normally in the terminal. Only <voice> conte
 Speak freely and conversationally - the user prefers hearing your responses.
 `;
 
+type BrokerRequest = {
+  type: "health" | "speak" | "stop";
+  text?: string;
+  voice?: string;
+  sourceApp?: string;
+  sessionId?: string;
+  pid?: number;
+};
+
+type BrokerResponse = {
+  ok?: boolean;
+  error?: string;
+  queued?: number;
+  pending?: number;
+  playing?: boolean;
+};
+
 export default function (pi: ExtensionAPI) {
   let ttsEnabled = true;       // Master switch - controls everything
   let ttsMuted = false;        // Just mute audio, keep voice tags
@@ -87,18 +106,92 @@ export default function (pi: ExtensionAPI) {
   let serverWarningShown = false;  // Only show server warning once per session
   let voiceStyle: "succinct" | "verbose" = "verbose";  // Voice prompt style
   let currentVoice = DEFAULT_VOICE;  // Current TTS voice
-  
+  let currentSessionId: string | undefined;
+
   // Streaming state
   let voiceBuffer = "";
   let processedUpTo = 0;
-  let audioQueue: Promise<void> = Promise.resolve();
-  let currentPlayer: ChildProcess | null = null;
 
-  // Check if server is running (Loqui.app)
+  function sendBrokerCommand(command: BrokerRequest, timeoutMs = 2500): Promise<BrokerResponse> {
+    return new Promise((resolve, reject) => {
+      const socket = net.createConnection({ host: TTS_HOST, port: BROKER_PORT });
+      socket.setEncoding("utf8");
+
+      let settled = false;
+      let buffer = "";
+
+      const finish = (fn: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        fn();
+      };
+
+      const timeout = setTimeout(() => {
+        finish(() => {
+          socket.destroy();
+          reject(new Error("Loqui broker timeout"));
+        });
+      }, timeoutMs);
+
+      socket.on("connect", () => {
+        socket.write(`${JSON.stringify(command)}\n`);
+        socket.end();
+      });
+
+      socket.on("data", (chunk) => {
+        buffer += chunk;
+        const idx = buffer.indexOf("\n");
+        if (idx === -1) return;
+
+        const line = buffer.slice(0, idx).trim();
+        finish(() => {
+          socket.destroy();
+          if (!line) {
+            reject(new Error("Empty broker response"));
+            return;
+          }
+          try {
+            resolve(JSON.parse(line) as BrokerResponse);
+          } catch {
+            reject(new Error("Invalid broker response"));
+          }
+        });
+      });
+
+      socket.on("error", (err) => {
+        finish(() => reject(err));
+      });
+
+      socket.on("end", () => {
+        if (settled) return;
+        const line = buffer.trim();
+        finish(() => {
+          if (!line) {
+            reject(new Error("No broker response"));
+            return;
+          }
+          try {
+            resolve(JSON.parse(line) as BrokerResponse);
+          } catch {
+            reject(new Error("Invalid broker response"));
+          }
+        });
+      });
+    });
+  }
+
+  // Check if Loqui server + broker are running
   async function checkServer(): Promise<boolean> {
     try {
       const res = await fetch(`http://${TTS_HOST}:${TTS_PORT}/health`);
-      serverReady = res.ok;
+      if (!res.ok) {
+        serverReady = false;
+        return false;
+      }
+
+      const broker = await sendBrokerCommand({ type: "health" });
+      serverReady = broker.ok === true;
       return serverReady;
     } catch {
       serverReady = false;
@@ -111,7 +204,7 @@ export default function (pi: ExtensionAPI) {
     const results: { content: string; endIndex: number }[] = [];
     const regex = /<voice>([\s\S]*?)<\/voice>/g;
     regex.lastIndex = fromIndex;
-    
+
     let match;
     while ((match = regex.exec(text)) !== null) {
       results.push({
@@ -119,152 +212,36 @@ export default function (pi: ExtensionAPI) {
         endIndex: match.index + match[0].length,
       });
     }
-    
+
     return results;
   }
 
-  // Stream audio using PCM piped to ffplay
-  async function speakStreaming(text: string): Promise<void> {
+  async function enqueueSpeech(text: string) {
     if (!text.trim()) return;
 
-    // console.log("[TTS] Speaking:", text.slice(0, 50));
-
-    // Create abort controller with timeout
-    const abortController = new AbortController();
-    const fetchTimeout = setTimeout(() => abortController.abort(), 5000);
-
     try {
-      const res = await fetch(`http://${TTS_HOST}:${TTS_PORT}/stream`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, voice: currentVoice }),
-        signal: abortController.signal,
-      });
-      clearTimeout(fetchTimeout);
-
-      if (!res.ok || !res.body) {
-        console.log("[TTS] Server response not ok:", res.status);
-        return;
-      }
-      // console.log("[TTS] Got stream, spawning ffplay");
-
-      const player = spawn("/opt/homebrew/bin/ffplay", [
-        "-f", "s16le",
-        "-ar", "24000",
-        "-ch_layout", "mono",
-        "-nodisp",
-        "-autoexit",
-        "-loglevel", "quiet",
-        "-i", "pipe:0"
-      ], {
-        stdio: ["pipe", "ignore", "ignore"],
-      });
-      
-      let playerExited = false;
-
-      // Handle player errors gracefully
-      player.on("error", () => {
-        playerExited = true;
-        currentPlayer = null;
-      });
-      
-      player.on("exit", () => {
-        playerExited = true;
-        currentPlayer = null;
+      const response = await sendBrokerCommand({
+        type: "speak",
+        text,
+        voice: currentVoice,
+        sourceApp: "pi",
+        sessionId: currentSessionId,
+        pid: process.pid,
       });
 
-      // Handle stdin errors (EPIPE when player exits early)
-      if (player.stdin) {
-        player.stdin.on("error", () => {
-          // Ignore EPIPE errors - player may have exited
-        });
+      if (!response.ok) {
+        console.log("[TTS] Broker rejected speech:", response.error ?? "unknown error");
       }
-
-      currentPlayer = player;
-
-      const reader = res.body.getReader();
-      
-      // Stream timeout - abort if no data for 10 seconds
-      let streamTimeout: ReturnType<typeof setTimeout>;
-      const resetStreamTimeout = () => {
-        clearTimeout(streamTimeout);
-        streamTimeout = setTimeout(() => {
-          reader.cancel().catch(() => {});
-          if (!playerExited) player.kill();
-        }, 10000);
-      };
-      resetStreamTimeout();
-      
-      try {
-        while (!playerExited) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          
-          resetStreamTimeout();
-          
-          // Check if player is still alive before writing
-          if (player.stdin && !player.stdin.destroyed && !player.killed) {
-            try {
-              player.stdin.write(Buffer.from(value));
-            } catch {
-              // Player died, stop trying to write
-              break;
-            }
-          } else {
-            break;
-          }
-        }
-      } finally {
-        clearTimeout(streamTimeout);
-        try {
-          reader.cancel().catch(() => {});
-          if (player.stdin && !player.stdin.destroyed) {
-            player.stdin.end();
-          }
-        } catch {
-          // Ignore errors on cleanup
-        }
-      }
-
-      // Wait for player to exit (ffplay with -autoexit will exit when done)
-      if (!playerExited) {
-        await new Promise<void>((resolve) => {
-          const exitHandler = () => {
-            playerExited = true;
-            currentPlayer = null;
-            resolve();
-          };
-          player.on("exit", exitHandler);
-          player.on("error", exitHandler);
-          // Long timeout fallback (60s) - ffplay should exit on its own with -autoexit
-          setTimeout(() => {
-            if (!playerExited) {
-              player.kill();
-            }
-            currentPlayer = null;
-            resolve();
-          }, 60000);
-        });
-      }
-
     } catch (err) {
-      clearTimeout(fetchTimeout);
-      if ((err as Error).name === "AbortError") {
-        console.log("[TTS] Fetch timed out");
-      } else {
-        console.log("[TTS] Error:", err);
-      }
+      console.log("[TTS] Broker error:", err);
+      serverReady = false;
     }
-  }
-
-  function queueSpeech(text: string) {
-    audioQueue = audioQueue.then(() => speakStreaming(text)).catch(() => {});
   }
 
   // Process streaming text for voice tags
   async function processStreamingText(fullText: string) {
     if (!ttsEnabled) return;
-    
+
     // Retry server check if not ready
     if (!serverReady) {
       await checkServer();
@@ -272,13 +249,14 @@ export default function (pi: ExtensionAPI) {
     }
 
     voiceBuffer = fullText;
-    
+
     // Find complete <voice> tags we haven't processed yet
     const voiceTags = extractVoiceTags(voiceBuffer, processedUpTo);
-    
+
     for (const tag of voiceTags) {
       if (tag.content) {
-        queueSpeech(tag.content);
+        // Fire-and-forget to avoid blocking token stream updates
+        void enqueueSpeech(tag.content);
       }
       processedUpTo = tag.endIndex;
     }
@@ -300,7 +278,9 @@ export default function (pi: ExtensionAPI) {
 
   // Check server on session start
   pi.on("session_start", async (_event, ctx) => {
+    currentSessionId = ctx.sessionManager.getSessionId();
     serverWarningShown = false;  // Reset for new session
+
     const ready = await checkServer();
     if (ttsEnabled) {
       if (ready) {
@@ -308,7 +288,10 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.setStatus("tts", "🔊");
       } else {
         if (!serverWarningShown) {
-          ctx.ui.notify("⚠️ TTS server not running. Start Loqui.app or install with: brew install swairshah/tap/loqui", "warning");
+          ctx.ui.notify(
+            "⚠️ Loqui broker not running. Start/update Loqui.app (or install with: brew install swairshah/tap/loqui)",
+            "warning"
+          );
           serverWarningShown = true;
         }
         ctx.ui.setStatus("tts", "⚠️");
@@ -318,10 +301,8 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  pi.on("session_shutdown", async () => {
-    if (currentPlayer) {
-      currentPlayer.kill();
-    }
+  pi.on("session_switch", async (_event, ctx) => {
+    currentSessionId = ctx.sessionManager.getSessionId();
   });
 
   pi.on("message_start", async (event) => {
@@ -334,7 +315,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("message_update", async (event) => {
     if (!ttsEnabled || ttsMuted) return;
-    
+
     const msg = event.message;
     if (msg.role !== "assistant") return;
 
@@ -343,7 +324,7 @@ export default function (pi: ExtensionAPI) {
       .map((c) => c.text);
 
     const fullText = textParts.join(" ");
-    processStreamingText(fullText);
+    void processStreamingText(fullText);
   });
 
   pi.on("message_end", async (event) => {
@@ -372,8 +353,8 @@ export default function (pi: ExtensionAPI) {
       ttsEnabled = !ttsEnabled;
       ttsMuted = false; // Reset mute when toggling master
       ctx.ui.notify(
-        ttsEnabled 
-          ? "🔊 TTS enabled - I'll include voice summaries" 
+        ttsEnabled
+          ? "🔊 TTS enabled - I'll include voice summaries"
           : "🔇 TTS disabled - normal text responses",
         "info"
       );
@@ -435,21 +416,22 @@ export default function (pi: ExtensionAPI) {
       if (!serverReady) {
         const ready = await checkServer();
         if (!ready) {
-          ctx.ui.notify("TTS server not running", "error");
+          ctx.ui.notify("Loqui broker not running", "error");
           return;
         }
       }
-      queueSpeech(args);
+      await enqueueSpeech(args);
     },
   });
 
   pi.registerCommand("tts-stop", {
     description: "Stop current speech",
     handler: async (_args, ctx) => {
-      if (currentPlayer) {
-        currentPlayer.kill();
-        currentPlayer = null;
+      try {
+        await sendBrokerCommand({ type: "stop" });
         ctx.ui.notify("Speech stopped", "info");
+      } catch {
+        ctx.ui.notify("Could not reach Loqui broker", "warning");
       }
     },
   });
@@ -464,6 +446,7 @@ export default function (pi: ExtensionAPI) {
         `Audio: ${ttsMuted ? "muted" : "on"}`,
         `Voice: ${currentVoice}`,
         `Style: ${voiceStyle}`,
+        `Session: ${currentSessionId ?? "unknown"}`,
       ].join(" | ");
       ctx.ui.notify(status, "info");
       updateStatus(ctx);
