@@ -1,87 +1,100 @@
 # Releasing Loqui
 
-## 1. Bump version
-
-Update `build-app.sh` Info.plist section:
-- `CFBundleShortVersionString` — user-facing version (e.g., `1.0.0`)
-- `CFBundleVersion` — increment build number
-
-## 2. Build
+This project now has an automated release script:
 
 ```bash
-cd PocketTTSApp
-./build-app.sh
+./scripts/release.sh <version>
 ```
 
-## 3. Create distribution zip
+Example:
 
 ```bash
-VERSION="1.0.0"  # Update this
-
-# Create dist directory
-mkdir -p dist
-
-# Zip the app
-ditto -c -k --keepParent .build/Loqui.app dist/Loqui-${VERSION}.zip
-
-# Also include the pi extension in a separate zip
-zip -j dist/pi-extension-${VERSION}.zip pi-extension/index.ts
+./scripts/release.sh 1.2.0
 ```
 
-## 4. (Optional) Sign & Notarize
+---
 
-If you have a Developer ID:
+## What the script does
+
+`scripts/release.sh` will:
+
+1. Update `CFBundleShortVersionString` in `scripts/build-app.sh`
+2. Build Loqui + `ptts`
+3. Bundle `pocket-tts-cli` + model files into `.build/Loqui.app`
+4. Sign the app
+5. Zip to `dist/Loqui-<version>.zip`
+6. Notarize with Apple (`xcrun notarytool`) and staple ticket
+7. Re-zip stapled app
+8. Zip pi extension to `dist/pi-talk-<version>.zip`
+9. Print SHA256 and update `~/work/projects/homebrew-tap/Casks/loqui.rb` (if present)
+
+---
+
+## Prerequisites
+
+- Apple notarization credentials stored in keychain profile used by script (`AC_PASSWORD`)
+- Developer ID signing identity available on your machine
+- `gh` CLI installed (for GitHub release step)
+
+Optional one-time setup:
 
 ```bash
-# Sign
-codesign --force --deep --options runtime --timestamp \
-  --sign "Developer ID Application" \
-  .build/Loqui.app
-
-# Notarize
-xcrun notarytool submit dist/Loqui-${VERSION}.zip \
-  --apple-id "$APPLE_EMAIL" \
-  --team-id "$APPLE_TEAM_ID" \
-  --password "$APPLE_APP_PASSWORD" \
-  --wait
-
-# Staple & re-zip
-xcrun stapler staple .build/Loqui.app
-rm dist/Loqui-${VERSION}.zip
-ditto -c -k --keepParent .build/Loqui.app dist/Loqui-${VERSION}.zip
+xcrun notarytool store-credentials "AC_PASSWORD" \
+  --apple-id "<apple-id>" \
+  --team-id "8B9YURJS4G" \
+  --password "<app-specific-password>"
 ```
 
-## 5. GitHub release
+---
+
+## Manual steps after script completes
+
+### 1) Create and push git tag
 
 ```bash
-VERSION="1.0.0"
+VERSION="1.2.0"
 
 git tag -a v${VERSION} -m "Release v${VERSION}"
 git push origin v${VERSION}
+```
+
+### 2) Create GitHub release
+
+```bash
+VERSION="1.2.0"
 
 gh release create v${VERSION} \
   dist/Loqui-${VERSION}.zip \
-  dist/pi-extension-${VERSION}.zip \
+  dist/pi-talk-${VERSION}.zip \
   --title "Loqui v${VERSION}" \
-  --notes "Release notes here"
+  --notes "Release notes"
 ```
 
-## 6. Update Homebrew tap
+### 3) Push Homebrew tap update
 
 ```bash
-# Get SHA
-shasum -a 256 dist/Loqui-${VERSION}.zip
-
-# Update ~/work/projects/homebrew-tap/Casks/loqui.rb with new version and SHA
-
 cd ~/work/projects/homebrew-tap
 git add Casks/loqui.rb
 git commit -m "Update loqui to ${VERSION}"
 git push
 ```
 
-## Post-install
+---
 
-After `brew install loqui`, users should:
-1. Open Loqui.app (it will appear in menubar)
-2. Restart Pi to load the extension (if Pi is installed)
+## pi extension (npm)
+
+The script only creates `dist/pi-talk-<version>.zip`.
+Publishing `@swairshah/pi-talk` to npm is a separate step and can be done later.
+
+---
+
+## Post-install notes for users
+
+After `brew install loqui`:
+
+1. Open Loqui.app (menu bar app)
+2. In Pi, install extension:
+   ```bash
+   pi install npm:@swairshah/pi-talk
+   ```
+3. Restart Pi if needed so extension loads
