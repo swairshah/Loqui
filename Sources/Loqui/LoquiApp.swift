@@ -465,9 +465,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let hostingController = NSHostingController(rootView: settingsView)
             
             let window = NSWindow(contentViewController: hostingController)
-            window.title = "Loqui Settings"
-            window.styleMask = [.titled, .closable]
-            window.setContentSize(NSSize(width: 450, height: 420))
+            window.title = "Loqui"
+            window.styleMask = [.titled, .closable, .resizable, .miniaturizable]
+            window.titleVisibility = .hidden
+            window.titlebarAppearsTransparent = true
+            window.isMovableByWindowBackground = true
+            window.setContentSize(NSSize(width: 520, height: 480))
+            window.minSize = NSSize(width: 420, height: 380)
             window.center()
             
             settingsWindow = window
@@ -1088,20 +1092,24 @@ struct SettingsView: View {
         TabView {
             GeneralSettingsView()
                 .tabItem {
-                    Label("General", systemImage: "gear")
+                    Text("General")
                 }
 
             HistoryView()
                 .tabItem {
-                    Label("History", systemImage: "clock.arrow.circlepath")
+                    Text("History")
                 }
-            
+
             HelpView()
                 .tabItem {
-                    Label("Help", systemImage: "questionmark.circle")
+                    Text("Help")
+                }
+
+            AboutView()
+                .tabItem {
+                    Text("About")
                 }
         }
-        .frame(width: 450, height: 400)
     }
 }
 
@@ -1111,82 +1119,90 @@ struct GeneralSettingsView: View {
     @AppStorage("launchAtLogin") var launchAtLogin = false
     @AppStorage("showDockIcon") var showDockIcon = true
     @State private var isPreviewPlaying = false
+    @State private var portString = ""
     
     // All available voices from kyutai/pocket-tts
     let availableVoices = ["alba", "marius", "javert", "fantine", "cosette", "eponine", "azelma"]
     
     var body: some View {
         Form {
-            // App header with icon
             Section {
-                VStack(spacing: 8) {
+                VStack(spacing: 6) {
                     Image(nsImage: NSApp.applicationIconImage)
                         .resizable()
-                        .frame(width: 64, height: 64)
+                        .frame(width: 48, height: 48)
                     Text("Loqui")
-                        .font(.title2)
+                        .font(.title3)
                         .fontWeight(.semibold)
                     Text("Local Text-to-Speech")
-                        .font(.subheadline)
+                        .font(.caption)
                         .foregroundColor(.secondary)
                 }
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 8)
+                .padding(.vertical, 2)
             }
-            
-            Section {
-                Picker("Voice", selection: $voice) {
-                    ForEach(availableVoices, id: \.self) { v in
-                        Text(v.capitalized).tag(v)
-                    }
-                }
-                .onChange(of: voice) { newVoice in
-                    previewVoice(newVoice)
-                }
-            } header: {
-                Text("Voice")
-            }
-            
-            Section {
+
+            Section("Voice") {
                 HStack {
-                    TextField("Port", value: $port, formatter: NumberFormatter())
-                        .frame(width: 80)
-                    Button("Apply") {
-                        restartServerForSettingsChange()
+                    Picker("Voice", selection: $voice) {
+                        ForEach(availableVoices, id: \.self) { v in
+                            Text(v.capitalized).tag(v)
+                        }
                     }
+                    .pickerStyle(.menu)
+
+                    Spacer()
+
+                    Button(isPreviewPlaying ? "Playing…" : "Preview") {
+                        previewVoice(voice)
+                    }
+                    .disabled(isPreviewPlaying)
                 }
-            } header: {
-                Text("Server")
             }
-            
-            Section {
+
+            Section("Server") {
+                HStack {
+                    Text("Port")
+                    Spacer()
+                    TextField("", text: $portString)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 90)
+                        .multilineTextAlignment(.center)
+                    Button("Apply") {
+                        if let newPort = Int(portString), newPort > 0 {
+                            port = newPort
+                            restartServerForSettingsChange()
+                        }
+                    }
+                    .disabled(Int(portString) == port)
+                }
+            }
+
+            Section("General") {
                 Toggle("Launch at Login", isOn: $launchAtLogin)
                     .onChange(of: launchAtLogin) { newValue in
                         setLaunchAtLogin(enabled: newValue)
                     }
+
                 Toggle("Show Dock Icon", isOn: $showDockIcon)
                     .onChange(of: showDockIcon) { _ in
                         updateDockIcon()
                     }
-            } header: {
-                Text("General")
             }
-            
-            Section {
+
+            Section("Shortcut") {
                 HStack {
-                    Text("Stop Speech (Global)")
+                    Text("Stop Speech")
+                        .foregroundColor(.secondary)
                     Spacer()
-                    Text("⌘.")
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(Color.secondary.opacity(0.2))
-                        .cornerRadius(4)
+                    KeyboardShortcutView(keys: ["⌘", "."])
                 }
-            } header: {
-                Text("Shortcuts")
             }
         }
         .formStyle(.grouped)
+        .onAppear {
+            portString = String(port)
+        }
     }
     
     func updateDockIcon() {
@@ -1279,6 +1295,7 @@ struct GeneralSettingsView: View {
 
 struct HistoryView: View {
     @StateObject private var historyStore = RequestHistoryStore.shared
+    @State private var searchText = ""
     @State private var selectedAppFilter = Self.allAppsToken
     @State private var selectedSessionFilter = Self.allSessionsToken
 
@@ -1293,27 +1310,45 @@ struct HistoryView: View {
         return formatter
     }()
 
+    private var availableApps: [String] {
+        let apps = Set(historyStore.entries.map { normalizedAppName($0.sourceApp) })
+        return apps.sorted()
+    }
+
+    private var availableSessions: [String] {
+        let sessions = Set(historyStore.entries.compactMap { normalizedSessionId($0.sessionId) })
+        return sessions.sorted()
+    }
+
     private var appFilterOptions: [String] {
-        let apps = Set(historyStore.entries.map { normalizedAppName($0.sourceApp) }).sorted()
-        return [Self.allAppsToken] + apps
+        [Self.allAppsToken] + availableApps
     }
 
     private var sessionFilterOptions: [String] {
-        let sessions = Set(historyStore.entries.compactMap { normalizedSessionId($0.sessionId) }).sorted()
         var options = [Self.allSessionsToken]
         if historyStore.entries.contains(where: { normalizedSessionId($0.sessionId) == nil }) {
             options.append(Self.noSessionToken)
         }
-        options.append(contentsOf: sessions)
+        options.append(contentsOf: availableSessions)
         return options
     }
 
     private var isFiltering: Bool {
-        selectedAppFilter != Self.allAppsToken || selectedSessionFilter != Self.allSessionsToken
+        !searchText.isEmpty || selectedAppFilter != Self.allAppsToken || selectedSessionFilter != Self.allSessionsToken
     }
 
     private var filteredEntries: [RequestHistoryEntry] {
         historyStore.entries.filter { entry in
+            if !searchText.isEmpty {
+                let searchLower = searchText.lowercased()
+                let textMatches = entry.text.lowercased().contains(searchLower)
+                let appMatches = normalizedAppName(entry.sourceApp).lowercased().contains(searchLower)
+                let sessionMatches = (entry.sessionId?.lowercased().contains(searchLower) ?? false)
+                if !textMatches && !appMatches && !sessionMatches {
+                    return false
+                }
+            }
+
             if selectedAppFilter != Self.allAppsToken,
                normalizedAppName(entry.sourceApp) != selectedAppFilter {
                 return false
@@ -1343,95 +1378,128 @@ struct HistoryView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Request History")
-                        .font(.headline)
-                    Text("Queue: \(queueEntries.count) · Completed: \(completedEntries.count)")
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("History")
+                            .font(.title2)
+                            .fontWeight(.semibold)
+                        Text("\(queueEntries.count) queued · \(completedEntries.count) completed")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                    if isFiltering {
+                        Button("Reset Filters") {
+                            searchText = ""
+                            selectedAppFilter = Self.allAppsToken
+                            selectedSessionFilter = Self.allSessionsToken
+                        }
+                        .buttonStyle(.plain)
                         .font(.caption)
+                    }
+                    Button {
+                        historyStore.clear()
+                    } label: {
+                        Image(systemName: "trash")
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(historyStore.entries.isEmpty)
+                    .help("Clear all history")
+                }
+
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
                         .foregroundColor(.secondary)
+                        .font(.caption)
+                    TextField("Search text, app, or session...", text: $searchText)
+                        .textFieldStyle(.plain)
+                        .font(.callout)
                 }
-                Spacer()
-                if isFiltering {
-                    Button("Reset Filters") {
-                        selectedAppFilter = Self.allAppsToken
-                        selectedSessionFilter = Self.allSessionsToken
-                    }
-                }
-                Button("Clear") {
-                    historyStore.clear()
-                }
-                .disabled(historyStore.entries.isEmpty)
-            }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color(NSColor.controlBackgroundColor))
+                .cornerRadius(8)
 
-            HStack(spacing: 10) {
-                Picker("App", selection: $selectedAppFilter) {
-                    ForEach(appFilterOptions, id: \.self) { option in
-                        Text(appFilterLabel(option)).tag(option)
+                HStack(spacing: 8) {
+                    Picker("App", selection: $selectedAppFilter) {
+                        ForEach(appFilterOptions, id: \.self) { option in
+                            Text(appFilterLabel(option)).tag(option)
+                        }
                     }
-                }
-                .pickerStyle(.menu)
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
-                Picker("Session", selection: $selectedSessionFilter) {
-                    ForEach(sessionFilterOptions, id: \.self) { option in
-                        Text(sessionFilterLabel(option)).tag(option)
+                    Picker("Session", selection: $selectedSessionFilter) {
+                        ForEach(sessionFilterOptions, id: \.self) { option in
+                            Text(sessionFilterLabel(option)).tag(option)
+                        }
                     }
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .pickerStyle(.menu)
             }
+            .padding()
+            .background(Color(NSColor.windowBackgroundColor))
+
+            Divider()
 
             if historyStore.entries.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("No requests yet")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                    Text("Requests sent through Loqui's local broker will appear here.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                Spacer()
+                emptyState(
+                    icon: "bubble.left.and.bubble.right",
+                    title: "No requests yet",
+                    subtitle: "Speech requests will appear here"
+                )
             } else if filteredEntries.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("No matches for current filters")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                    Text("Try a different app/session filter or reset filters.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                Spacer()
+                emptyState(
+                    icon: "magnifyingglass",
+                    title: "No matches",
+                    subtitle: "Try adjusting your search or filters"
+                )
             } else {
                 List {
                     if !queueEntries.isEmpty {
-                        Section("Queue") {
+                        Section {
                             ForEach(queueEntries) { entry in
                                 entryRow(entry)
                             }
+                        } header: {
+                            Label("Queue", systemImage: "play.circle")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
                         }
                     }
 
-                    Section("History") {
-                        if completedEntries.isEmpty {
-                            Text("No completed requests yet")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        } else {
-                            ForEach(completedEntries) { entry in
-                                entryRow(entry)
-                            }
+                    Section {
+                        ForEach(completedEntries) { entry in
+                            entryRow(entry)
                         }
+                    } header: {
+                        Label("Completed", systemImage: "checkmark.circle")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
                     }
                 }
                 .listStyle(.inset)
             }
         }
-        .padding()
+        .onChange(of: appFilterOptions) { options in
+            if selectedAppFilter != Self.allAppsToken && !options.contains(selectedAppFilter) {
+                selectedAppFilter = Self.allAppsToken
+            }
+        }
+        .onChange(of: sessionFilterOptions) { options in
+            if selectedSessionFilter != Self.allSessionsToken && !options.contains(selectedSessionFilter) {
+                selectedSessionFilter = Self.allSessionsToken
+            }
+        }
     }
 
     private func normalizedAppName(_ sourceApp: String?) -> String {
         let trimmed = sourceApp?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return (trimmed?.isEmpty == false) ? trimmed! : "Unknown app"
+        return (trimmed?.isEmpty == false) ? trimmed! : "Unknown"
     }
 
     private func normalizedSessionId(_ sessionId: String?) -> String? {
@@ -1446,131 +1514,368 @@ struct HistoryView: View {
     private func sessionFilterLabel(_ option: String) -> String {
         if option == Self.allSessionsToken { return "All sessions" }
         if option == Self.noSessionToken { return "No session" }
-        return "\(String(option.prefix(8)))…"
+        return String(option.prefix(12)) + (option.count > 12 ? "…" : "")
+    }
+
+    @ViewBuilder
+    private func emptyState(icon: String, title: String, subtitle: String) -> some View {
+        VStack(spacing: 12) {
+            Spacer()
+            Image(systemName: icon)
+                .font(.system(size: 36))
+                .foregroundColor(.secondary.opacity(0.5))
+            Text(title)
+                .font(.headline)
+                .foregroundColor(.secondary)
+            Text(subtitle)
+                .font(.caption)
+                .foregroundColor(.secondary.opacity(0.8))
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     @ViewBuilder
     private func entryRow(_ entry: RequestHistoryEntry) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text(normalizedAppName(entry.sourceApp))
                     .font(.subheadline)
-                    .fontWeight(.semibold)
+                    .fontWeight(.medium)
 
                 statusBadge(for: entry.status)
 
                 Spacer()
+
                 Text(Self.timestampFormatter.string(from: entry.timestamp))
-                    .font(.caption)
+                    .font(.caption2)
                     .foregroundColor(.secondary)
             }
 
             Text(entry.text)
-                .font(.system(.caption, design: .monospaced))
-                .lineLimit(4)
+                .font(.callout)
+                .lineLimit(3)
+                .foregroundColor(.primary.opacity(0.9))
 
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
                 if let voice = entry.voice, !voice.isEmpty {
-                    Text("Voice: \(voice)")
-                }
-                if let pid = entry.pid {
-                    Text("PID: \(pid)")
+                    Label(voice, systemImage: "waveform")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
                 }
                 if let sessionId = normalizedSessionId(entry.sessionId) {
-                    Text("Session: \(String(sessionId.prefix(8)))")
+                    Label(String(sessionId.prefix(8)), systemImage: "number")
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundColor(.secondary)
                 }
                 if entry.status == .interrupted {
-                    Text("Stopped via ⌘.")
+                    Label("Stopped via ⌘.", systemImage: "stop.fill")
+                        .font(.caption2)
                         .foregroundColor(.orange)
                 }
             }
-            .font(.caption2)
-            .foregroundColor(.secondary)
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 4)
     }
 
     @ViewBuilder
     private func statusBadge(for status: RequestPlaybackStatus) -> some View {
-        Text(status.displayName)
-            .font(.caption2)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(status.tintColor.opacity(0.18))
-            .foregroundColor(status.tintColor)
-            .cornerRadius(6)
+        HStack(spacing: 3) {
+            Circle()
+                .fill(status.tintColor)
+                .frame(width: 6, height: 6)
+            Text(status.displayName)
+                .font(.caption2)
+                .foregroundColor(status.tintColor)
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(status.tintColor.opacity(0.12))
+        .cornerRadius(4)
     }
 }
+
 
 struct HelpView: View {
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                Group {
-                    Text("Getting Started")
-                        .font(.headline)
-                    Text("Loqui is a local text-to-speech server. Any application can send text to Loqui and have it spoken aloud.")
+            VStack(alignment: .leading, spacing: 20) {
+                helpSection(title: "Using Loqui with Pi Agent", icon: "terminal") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("How to use Loqui with the pi.dev agent:")
+                            .font(.callout)
+                            .foregroundColor(.secondary)
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("1. Keep Loqui running in the menu bar.")
+                            Text("2. Install the extension in Pi.")
+                            Text("3. Ask Pi to respond normally — the extension routes <voice> content to Loqui.")
+                            Text("4. Use Pi commands to control playback.")
+                        }
+                        .font(.caption)
                         .foregroundColor(.secondary)
-                }
-                
-                Divider()
-                
-                Group {
-                    Text("CLI Usage")
-                        .font(.headline)
-                    Text("Use the `ptts` command in Terminal:")
-                        .foregroundColor(.secondary)
-                    
-                    VStack(alignment: .leading, spacing: 4) {
-                        codeRow("ptts \"Hello, world!\"")
-                        codeRow("ptts -v alba \"Hello\"")
-                        codeRow("echo \"Hello\" | ptts")
-                        codeRow("ptts --stop")
-                        codeRow("ptts --list-voices")
+
+                        CodeRow(code: "pi install npm:@swairshah/pi-talk", description: "Install extension")
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            CodeRow(code: "/tts", description: "Toggle TTS on/off")
+                            CodeRow(code: "/tts-mute", description: "Mute/unmute audio")
+                            CodeRow(code: "/tts-say <text>", description: "Speak arbitrary text")
+                            CodeRow(code: "/tts-stop", description: "Stop speech")
+                            CodeRow(code: "/tts-status", description: "Check extension + server status")
+                        }
                     }
                 }
-                
-                Divider()
-                
-                Group {
-                    Text("HTTP API")
-                        .font(.headline)
-                    Text("POST to http://127.0.0.1:18080/stream")
-                        .foregroundColor(.secondary)
-                    
-                    codeRow("{\"text\": \"Hello\", \"voice\": \"fantine\"}")
+
+                helpSection(title: "CLI Usage", icon: "chevron.left.forwardslash.chevron.right") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Use ptts in Terminal:")
+                            .font(.callout)
+                            .foregroundColor(.secondary)
+                        VStack(alignment: .leading, spacing: 4) {
+                            CodeRow(code: "ptts \"Hello, world!\"", description: "Enqueue speech")
+                            CodeRow(code: "ptts -v alba \"Hello\"", description: "Pick a voice")
+                            CodeRow(code: "echo \"Hello\" | ptts", description: "Pipe input")
+                            CodeRow(code: "ptts --stop", description: "Stop playback")
+                        }
+                    }
                 }
 
-                Group {
-                    Text("Local Broker Queue")
-                        .font(.headline)
-                    Text("TCP 127.0.0.1:18081 (NDJSON)")
-                        .foregroundColor(.secondary)
+                helpSection(title: "HTTP API", icon: "network") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Direct synthesis endpoint:")
+                            .font(.callout)
+                            .foregroundColor(.secondary)
+                        CodeRow(code: "POST http://127.0.0.1:18080/stream", description: "Stream PCM audio")
+                        CodeRow(code: "{\"text\":\"Hello\",\"voice\":\"fantine\"}", description: "JSON body")
+                    }
+                }
 
-                    codeRow("{\"type\":\"speak\",\"text\":\"Hello\",\"voice\":\"fantine\"}")
+                helpSection(title: "Local Broker Queue", icon: "arrow.triangle.branch") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Centralized playback queue endpoint:")
+                            .font(.callout)
+                            .foregroundColor(.secondary)
+                        CodeRow(code: "TCP 127.0.0.1:18081", description: "Connect via NDJSON")
+                        CodeRow(code: "{\"type\":\"speak\",\"text\":\"Hi\"}", description: "Enqueue request")
+                        CodeRow(code: "{\"type\":\"stop\"}", description: "Stop and clear queue")
+                        CodeRow(code: "{\"type\":\"health\"}", description: "Check broker status")
+                    }
                 }
-                
-                Divider()
-                
-                Group {
-                    Text("Global Shortcut")
-                        .font(.headline)
-                    Text("Configure the Stop Speech shortcut in the General tab.")
-                        .foregroundColor(.secondary)
-                }
-                
-                Spacer()
+
+                Spacer(minLength: 8)
             }
             .padding()
         }
+        .background(Color(NSColor.windowBackgroundColor))
     }
-    
-    func codeRow(_ code: String) -> some View {
-        Text(code)
-            .font(.system(.caption, design: .monospaced))
-            .padding(.horizontal, 8)
-            .padding(.vertical, 2)
-            .background(Color.secondary.opacity(0.1))
-            .cornerRadius(4)
+
+    @ViewBuilder
+    private func helpSection<Content: View>(title: String, icon: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: icon)
+                    .font(.body)
+                    .foregroundColor(.accentColor)
+                Text(title)
+                    .font(.headline)
+            }
+
+            content()
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(NSColor.controlBackgroundColor))
+        .cornerRadius(10)
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Color.secondary.opacity(0.1), lineWidth: 1)
+        )
+    }
+}
+
+struct AboutView: View {
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("About")
+                        .font(.title2)
+                        .fontWeight(.semibold)
+                    Text("We package the pocket-tts binary with the app, which runs a local server that lets any applications (including your coding agent - https://pi.dev!) be send text which Loqui says out loud. We ship a command line utility `ptts` so you can make any application talk via Loqui and we ship a pi extension so the pi agent gets a voice via Loqui.")
+                        .font(.callout)
+                        .foregroundColor(.secondary)
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Credits")
+                        .font(.headline)
+                    Text("Loqui is built on top of the PocketTTS ecosystem. Huge thanks to the original authors.")
+                        .font(.callout)
+                        .foregroundColor(.secondary)
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Pocket TTS")
+                        .font(.headline)
+                    Text("The original model by Kyutai Labs. Fast, compact, and high-quality local TTS.")
+                        .font(.callout)
+                        .foregroundColor(.secondary)
+                    Link("github.com/kyutai-labs/pocket-tts", destination: URL(string: "https://github.com/kyutai-labs/pocket-tts")!)
+                        .font(.caption)
+                }
+                .padding()
+                .background(Color(NSColor.controlBackgroundColor))
+                .cornerRadius(10)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color.secondary.opacity(0.1), lineWidth: 1)
+                )
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("pocket-tts (Rust implementation)")
+                        .font(.headline)
+                    Text("Native Rust implementation by babybirdprd used by Loqui under the hood.")
+                        .font(.callout)
+                        .foregroundColor(.secondary)
+                    Link("github.com/babybirdprd/pocket-tts", destination: URL(string: "https://github.com/babybirdprd/pocket-tts")!)
+                        .font(.caption)
+                }
+                .padding()
+                .background(Color(NSColor.controlBackgroundColor))
+                .cornerRadius(10)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color.secondary.opacity(0.1), lineWidth: 1)
+                )
+
+                Spacer(minLength: 8)
+            }
+            .padding()
+        }
+        .background(Color(NSColor.windowBackgroundColor))
+    }
+}
+
+
+struct CodeRow: View {
+    let code: String
+    var description: String? = nil
+
+    var body: some View {
+        HStack {
+            Text(code)
+                .font(.system(.caption, design: .monospaced))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color(NSColor.textBackgroundColor))
+                .cornerRadius(4)
+
+            if let desc = description {
+                Text(desc)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Spacer()
+
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(code, forType: .string)
+            } label: {
+                Image(systemName: "doc.on.doc")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Copy to clipboard")
+        }
+    }
+}
+
+struct KeyboardShortcutView: View {
+    let keys: [String]
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(keys, id: \.self) { key in
+                Text(key)
+                    .font(.system(.caption, design: .rounded, weight: .medium))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(Color(NSColor.controlBackgroundColor))
+                            .shadow(color: .black.opacity(0.1), radius: 0.5, y: 0.5)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4)
+                            .stroke(Color.secondary.opacity(0.3), lineWidth: 0.5)
+                    )
+            }
+        }
+    }
+}
+
+struct SettingsCard<Content: View>: View {
+    let icon: String
+    let title: String
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: icon)
+                    .font(.body)
+                    .foregroundColor(.accentColor)
+                Text(title)
+                    .font(.headline)
+            }
+
+            content()
+        }
+        .padding()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(NSColor.controlBackgroundColor))
+        .cornerRadius(10)
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Color.secondary.opacity(0.1), lineWidth: 1)
+        )
+    }
+}
+
+struct VoiceButton: View {
+    let name: String
+    let isSelected: Bool
+    let isPlaying: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                if isPlaying {
+                    Image(systemName: "speaker.wave.2.fill")
+                        .font(.caption2)
+                        .foregroundColor(.accentColor)
+                }
+                Text(name.capitalized)
+                    .font(.callout)
+                    .fontWeight(isSelected ? .semibold : .regular)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(isSelected ? Color.accentColor.opacity(0.15) : Color(NSColor.controlBackgroundColor))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(isSelected ? Color.accentColor : Color.secondary.opacity(0.2), lineWidth: isSelected ? 1.5 : 1)
+            )
+            .foregroundColor(isSelected ? .accentColor : .primary)
+        }
+        .buttonStyle(.plain)
     }
 }
