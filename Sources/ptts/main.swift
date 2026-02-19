@@ -14,7 +14,7 @@ import LoquiClient
 
 struct CLI {
     var text: String = ""
-    var voice: String = "alba"
+    var voice: String? = nil  // nil = let Loqui auto-assign
     var port: Int = 18080
     var brokerPort: Int = 18081
     var host: String = "127.0.0.1"
@@ -55,7 +55,7 @@ func printUsage() {
         <TEXT>    Text to speak (can also be piped via stdin)
 
     OPTIONS:
-        -v, --voice <VOICE>   Voice to use (default: fantine)
+        -v, --voice <VOICE>   Voice to use (default: auto-assigned by Loqui)
         -p, --port <PORT>     TTS server port (default: 18080)
         -b, --broker-port <PORT>
                               Broker queue port (default: 18081)
@@ -269,7 +269,7 @@ func stopViaBroker(host: String, brokerPort: Int) async throws {
     }
 }
 
-func enqueueViaBroker(host: String, brokerPort: Int, text: String, voice: String, sessionId: String?) async throws -> BrokerResponse {
+func enqueueViaBroker(host: String, brokerPort: Int, text: String, voice: String?, sessionId: String?) async throws -> BrokerResponse {
     let response = try await sendBrokerCommand(
         host: host,
         port: brokerPort,
@@ -283,8 +283,10 @@ func enqueueViaBroker(host: String, brokerPort: Int, text: String, voice: String
     return response
 }
 
-func outputRaw(client: TTSClient, text: String, voice: String) async throws {
-    let stream = client.streamSpeech(text: text, voice: voice)
+func outputRaw(client: TTSClient, text: String, voice: String?) async throws {
+    // Raw output requires explicit voice since it bypasses the broker
+    let resolvedVoice = voice ?? "fantine"
+    let stream = client.streamSpeech(text: text, voice: resolvedVoice)
 
     for try await chunk in stream {
         FileHandle.standardOutput.write(chunk)
@@ -349,9 +351,9 @@ func main() async {
         exit(1)
     }
 
-    // Validate voice
-    if !TTSClient.availableVoices.contains(cli.voice) {
-        FileHandle.standardError.write("Warning: Unknown voice '\(cli.voice)'\n".data(using: .utf8)!)
+    // Validate voice if explicitly specified
+    if let voice = cli.voice, !TTSClient.availableVoices.contains(voice) {
+        FileHandle.standardError.write("Warning: Unknown voice '\(voice)'\n".data(using: .utf8)!)
     }
 
     // Check server health

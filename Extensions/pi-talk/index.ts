@@ -27,8 +27,7 @@ import process from "node:process";
 const TTS_PORT = 18080;
 const TTS_HOST = "127.0.0.1";
 const BROKER_PORT = 18081;
-const DEFAULT_VOICE = "fantine";
-const AVAILABLE_VOICES = ["alba", "marius", "javert", "fantine", "cosette", "eponine", "azelma"];
+const AVAILABLE_VOICES = ["auto", "alba", "marius", "javert", "fantine", "cosette", "eponine", "azelma"];
 
 // System prompt injection for voice tags - succinct style
 const VOICE_PROMPT_SUCCINCT = `
@@ -105,7 +104,7 @@ export default function (pi: ExtensionAPI) {
   let serverReady = false;
   let serverWarningShown = false;  // Only show server warning once per session
   let voiceStyle: "succinct" | "verbose" = "verbose";  // Voice prompt style
-  let currentVoice = DEFAULT_VOICE;  // Current TTS voice
+  let currentVoice = "auto";  // Current TTS voice ("auto" = let Loqui assign per-session)
   let currentSessionId: string | undefined;
 
   // Streaming state
@@ -223,7 +222,7 @@ export default function (pi: ExtensionAPI) {
       const response = await sendBrokerCommand({
         type: "speak",
         text,
-        voice: currentVoice,
+        voice: currentVoice === "auto" ? undefined : currentVoice,
         sourceApp: "pi",
         sessionId: currentSessionId,
         pid: process.pid,
@@ -393,7 +392,8 @@ export default function (pi: ExtensionAPI) {
     description: `Change TTS voice (${AVAILABLE_VOICES.join(", ")})`,
     handler: async (args, ctx) => {
       if (!args) {
-        ctx.ui.notify(`Current voice: ${currentVoice}\nAvailable: ${AVAILABLE_VOICES.join(", ")}`, "info");
+        const voiceDisplay = currentVoice === "auto" ? "auto (Loqui assigns per-session)" : currentVoice;
+        ctx.ui.notify(`Current voice: ${voiceDisplay}\nAvailable: ${AVAILABLE_VOICES.join(", ")}`, "info");
         return;
       }
       const voice = args.trim().toLowerCase();
@@ -402,7 +402,10 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       currentVoice = voice;
-      ctx.ui.notify(`🎤 Voice changed to: ${voice}`, "info");
+      const msg = voice === "auto" 
+        ? "🎤 Voice: auto (Loqui will assign different voices per session)"
+        : `🎤 Voice changed to: ${voice}`;
+      ctx.ui.notify(msg, "info");
     },
   });
 
@@ -440,11 +443,12 @@ export default function (pi: ExtensionAPI) {
     description: "Show TTS status",
     handler: async (_args, ctx) => {
       const ready = await checkServer();
+      const voiceDisplay = currentVoice === "auto" ? "auto (per-session)" : currentVoice;
       const status = [
         `Server: ${ready ? "running ✓" : "not running ✗"}`,
         `TTS: ${ttsEnabled ? "enabled" : "disabled"}`,
         `Audio: ${ttsMuted ? "muted" : "on"}`,
-        `Voice: ${currentVoice}`,
+        `Voice: ${voiceDisplay}`,
         `Style: ${voiceStyle}`,
         `Session: ${currentSessionId ?? "unknown"}`,
       ].join(" | ");
