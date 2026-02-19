@@ -870,6 +870,11 @@ final class SpeechPlaybackCoordinator {
 
     private var isMicrophoneActive = false
 
+    // Auto voice assignment for queues that don't specify voice.
+    private let autoVoicePool = ["fantine", "alba", "cosette", "marius", "azelma"]
+    private var autoVoiceByQueueKey: [String: String] = [:]
+    private var autoVoiceCycleIndex = 0
+
     private let hostProvider: () -> String
     private let portProvider: () -> Int
     private let defaultVoiceProvider: () -> String
@@ -892,28 +897,28 @@ final class SpeechPlaybackCoordinator {
             return state().pending
         }
 
-        let resolvedVoice = (voice?.isEmpty == false ? voice! : defaultVoiceProvider())
-
-        let historyEntryId = RequestHistoryStore.shared.add(
-            text: trimmed,
-            voice: resolvedVoice,
-            sourceApp: sourceApp,
-            sessionId: sessionId,
-            pid: pid
-        )
-
-        let job = SpeechJob(
-            historyEntryId: historyEntryId,
-            text: trimmed,
-            voice: resolvedVoice,
-            sourceApp: sourceApp,
-            sessionId: sessionId,
-            pid: pid
-        )
-
         let key = queueKey(sourceApp: sourceApp, sessionId: sessionId)
 
         return queue.sync {
+            let resolvedVoice = resolveVoiceForQueueLocked(requestedVoice: voice, queueKey: key)
+
+            let historyEntryId = RequestHistoryStore.shared.add(
+                text: trimmed,
+                voice: resolvedVoice,
+                sourceApp: sourceApp,
+                sessionId: sessionId,
+                pid: pid
+            )
+
+            let job = SpeechJob(
+                historyEntryId: historyEntryId,
+                text: trimmed,
+                voice: resolvedVoice,
+                sourceApp: sourceApp,
+                sessionId: sessionId,
+                pid: pid
+            )
+
             if queuesByKey[key] == nil {
                 queuesByKey[key] = []
                 queueOrder.append(key)
@@ -938,6 +943,7 @@ final class SpeechPlaybackCoordinator {
 
             queuesByKey.removeAll()
             queueOrder.removeAll()
+            autoVoiceByQueueKey.removeAll()
             terminateCurrentProcessLocked()
             currentJobHistoryId = nil
             currentQueueKey = nil
@@ -981,6 +987,7 @@ final class SpeechPlaybackCoordinator {
 
             queuesByKey.removeAll()
             queueOrder.removeAll()
+            autoVoiceByQueueKey.removeAll()
             terminateCurrentProcessLocked()
             currentJobHistoryId = nil
             currentQueueKey = nil
@@ -1176,6 +1183,42 @@ final class SpeechPlaybackCoordinator {
         var request = URLRequest(url: stopURL)
         request.httpMethod = "POST"
         _ = try? await URLSession.shared.data(for: request)
+    }
+
+    private func resolveVoiceForQueueLocked(requestedVoice: String?, queueKey: String) -> String {
+        let trimmedRequested = requestedVoice?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let requested = trimmedRequested, !requested.isEmpty {
+            return requested
+        }
+
+        if let assigned = autoVoiceByQueueKey[queueKey] {
+            return assigned
+        }
+
+        let activeKeys = activeQueueKeysLocked().subtracting([queueKey])
+        let usedVoices = Set(activeKeys.compactMap { autoVoiceByQueueKey[$0] })
+
+        if let freeVoice = autoVoicePool.first(where: { !usedVoices.contains($0) }) {
+            autoVoiceByQueueKey[queueKey] = freeVoice
+            return freeVoice
+        }
+
+        guard !autoVoicePool.isEmpty else {
+            return defaultVoiceProvider()
+        }
+
+        let cycled = autoVoicePool[autoVoiceCycleIndex % autoVoicePool.count]
+        autoVoiceCycleIndex += 1
+        autoVoiceByQueueKey[queueKey] = cycled
+        return cycled
+    }
+
+    private func activeQueueKeysLocked() -> Set<String> {
+        var keys = Set(queuesByKey.keys)
+        if let currentQueueKey {
+            keys.insert(currentQueueKey)
+        }
+        return keys
     }
 
     private func queueKey(sourceApp: String?, sessionId: String?) -> String {
