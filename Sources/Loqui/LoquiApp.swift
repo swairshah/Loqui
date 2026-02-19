@@ -1195,8 +1195,10 @@ final class SpeechPlaybackCoordinator {
             return assigned
         }
 
-        let activeKeys = activeQueueKeysLocked().subtracting([queueKey])
-        let usedVoices = Set(activeKeys.compactMap { autoVoiceByQueueKey[$0] })
+        // Check all already-assigned voices, not just active queues.
+        // This ensures different sessions get different voices even if they're
+        // not concurrent (e.g., session A finishes before session B starts).
+        let usedVoices = Set(autoVoiceByQueueKey.values)
 
         if let freeVoice = autoVoicePool.first(where: { !usedVoices.contains($0) }) {
             autoVoiceByQueueKey[queueKey] = freeVoice
@@ -1211,14 +1213,6 @@ final class SpeechPlaybackCoordinator {
         autoVoiceCycleIndex += 1
         autoVoiceByQueueKey[queueKey] = cycled
         return cycled
-    }
-
-    private func activeQueueKeysLocked() -> Set<String> {
-        var keys = Set(queuesByKey.keys)
-        if let currentQueueKey {
-            keys.insert(currentQueueKey)
-        }
-        return keys
     }
 
     private func queueKey(sourceApp: String?, sessionId: String?) -> String {
