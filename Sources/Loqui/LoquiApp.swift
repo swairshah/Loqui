@@ -4,6 +4,7 @@ import ServiceManagement
 import Carbon.HIToolbox
 import Network
 import Darwin
+import CoreAudio
 
 @main
 struct LoquiApp: App {
@@ -26,6 +27,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var eventHandler: EventHandlerRef?
     var speechCoordinator: SpeechPlaybackCoordinator?
     var localBroker: LocalSpeechBroker?
+    var micMonitor: MicrophoneActivityMonitor?
     let brokerPort = 18081
     
     // Configuration
@@ -66,6 +68,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             portProvider: { [weak self] in self?.serverPort ?? 18080 },
             defaultVoiceProvider: { [weak self] in self?.selectedVoice ?? "fantine" }
         )
+
+        micMonitor = MicrophoneActivityMonitor { [weak self] isActive in
+            self?.speechCoordinator?.setMicrophoneActive(isActive)
+        }
+        micMonitor?.start()
+
         startLocalBroker()
         startServer()
     }
@@ -89,6 +97,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func applicationWillTerminate(_ notification: Notification) {
+        micMonitor?.stop()
         localBroker?.stop()
         speechCoordinator?.stopAll()
         stopServer()
@@ -522,13 +531,26 @@ private struct BrokerResponse: Encodable {
     let queued: Int?
     let pending: Int?
     let playing: Bool?
+    let currentQueue: String?
 
-    static func success(queued: Int? = nil, pending: Int? = nil, playing: Bool? = nil) -> BrokerResponse {
-        BrokerResponse(ok: true, error: nil, queued: queued, pending: pending, playing: playing)
+    static func success(
+        queued: Int? = nil,
+        pending: Int? = nil,
+        playing: Bool? = nil,
+        currentQueue: String? = nil
+    ) -> BrokerResponse {
+        BrokerResponse(
+            ok: true,
+            error: nil,
+            queued: queued,
+            pending: pending,
+            playing: playing,
+            currentQueue: currentQueue
+        )
     }
 
     static func failure(_ message: String) -> BrokerResponse {
-        BrokerResponse(ok: false, error: message, queued: nil, pending: nil, playing: nil)
+        BrokerResponse(ok: false, error: message, queued: nil, pending: nil, playing: nil, currentQueue: nil)
     }
 }
 
@@ -719,12 +741,134 @@ final class RequestHistoryStore: ObservableObject {
     }
 }
 
+final class MicrophoneActivityMonitor {
+    private let pollQueue = DispatchQueue(label: "loqui.mic.monitor")
+    private var timer: DispatchSourceTimer?
+
+    private let pollInterval: TimeInterval
+    private let releaseDelay: TimeInterval
+    private let onActivityChanged: (Bool) -> Void
+
+    private var isActive = false
+    private var keepActiveUntil = Date.distantPast
+
+    init(
+        pollInterval: TimeInterval = 0.25,
+        releaseDelay: TimeInterval = 0.8,
+        onActivityChanged: @escaping (Bool) -> Void
+    ) {
+        self.pollInterval = pollInterval
+        self.releaseDelay = releaseDelay
+        self.onActivityChanged = onActivityChanged
+    }
+
+    func start() {
+        guard timer == nil else { return }
+
+        let timer = DispatchSource.makeTimerSource(queue: pollQueue)
+        timer.schedule(deadline: .now(), repeating: pollInterval)
+        timer.setEventHandler { [weak self] in
+            self?.pollMicrophoneUsage()
+        }
+        timer.resume()
+        self.timer = timer
+    }
+
+    func stop() {
+        timer?.cancel()
+        timer = nil
+        setActive(false)
+    }
+
+    private func pollMicrophoneUsage() {
+        // Detect whether the default input device is currently running.
+        // This does not open the microphone from Loqui itself.
+        let inUse = isDefaultInputDeviceRunning()
+        let now = Date()
+
+        if inUse {
+            keepActiveUntil = now.addingTimeInterval(releaseDelay)
+            if !isActive {
+                setActive(true)
+            }
+        } else if isActive, now >= keepActiveUntil {
+            setActive(false)
+        }
+    }
+
+    private func isDefaultInputDeviceRunning() -> Bool {
+        var defaultInputAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+
+        var deviceID = AudioDeviceID(0)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+
+        let getDeviceStatus = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &defaultInputAddress,
+            0,
+            nil,
+            &size,
+            &deviceID
+        )
+
+        guard getDeviceStatus == noErr, deviceID != AudioDeviceID(kAudioObjectUnknown) else {
+            return false
+        }
+
+        var runningAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+
+        var running: UInt32 = 0
+        size = UInt32(MemoryLayout<UInt32>.size)
+
+        let getRunningStatus = AudioObjectGetPropertyData(
+            deviceID,
+            &runningAddress,
+            0,
+            nil,
+            &size,
+            &running
+        )
+
+        guard getRunningStatus == noErr else {
+            return false
+        }
+
+        return running != 0
+    }
+
+    private func setActive(_ active: Bool) {
+        guard active != isActive else { return }
+        isActive = active
+
+        DispatchQueue.main.async {
+            self.onActivityChanged(active)
+        }
+    }
+}
+
+
 final class SpeechPlaybackCoordinator {
     private let queue = DispatchQueue(label: "loqui.playback.coordinator")
-    private var pendingJobs: [SpeechJob] = []
+
+    // Per-source queue buckets keyed by app + session
+    private var queuesByKey: [String: [SpeechJob]] = [:]
+    private var queueOrder: [String] = []
+
     private var isPlaying = false
     private var currentProcess: Process?
     private var currentJobHistoryId: UUID?
+    private var currentQueueKey: String?
+    private var currentRunNonce: UUID?
+
+    private var isMicrophoneActive = false
 
     private let hostProvider: () -> String
     private let portProvider: () -> Int
@@ -767,28 +911,38 @@ final class SpeechPlaybackCoordinator {
             pid: pid
         )
 
+        let key = queueKey(sourceApp: sourceApp, sessionId: sessionId)
+
         return queue.sync {
-            pendingJobs.append(job)
+            if queuesByKey[key] == nil {
+                queuesByKey[key] = []
+                queueOrder.append(key)
+            }
+            queuesByKey[key]?.append(job)
+
             startNextIfNeededLocked()
-            return pendingJobs.count + (isPlaying ? 1 : 0)
+            return pendingCountLocked() + (isPlaying ? 1 : 0)
         }
     }
 
-    func state() -> (pending: Int, playing: Bool) {
+    func state() -> (pending: Int, playing: Bool, currentQueue: String?) {
         queue.sync {
-            (pendingJobs.count + (isPlaying ? 1 : 0), isPlaying)
+            (pendingCountLocked() + (isPlaying ? 1 : 0), isPlaying, currentQueueKey)
         }
     }
 
     func stopAll() {
         let state = queue.sync { () -> (pending: [UUID], active: UUID?) in
-            let pendingIds = self.pendingJobs.map(\.historyEntryId)
-            let activeId = self.currentJobHistoryId
+            let pendingIds = allPendingHistoryIdsLocked()
+            let activeId = currentJobHistoryId
 
-            self.pendingJobs.removeAll()
-            self.terminateCurrentProcessLocked()
-            self.currentJobHistoryId = nil
-            self.isPlaying = false
+            queuesByKey.removeAll()
+            queueOrder.removeAll()
+            terminateCurrentProcessLocked()
+            currentJobHistoryId = nil
+            currentQueueKey = nil
+            currentRunNonce = nil
+            isPlaying = false
 
             return (pending: pendingIds, active: activeId)
         }
@@ -802,15 +956,60 @@ final class SpeechPlaybackCoordinator {
         }
 
         Task {
-            await self.sendStopToServer()
+            await sendStopToServer()
+        }
+    }
+
+    func setMicrophoneActive(_ active: Bool) {
+        queue.async {
+            self.handleMicrophoneStateChangeLocked(active)
+        }
+    }
+
+    private func handleMicrophoneStateChangeLocked(_ active: Bool) {
+        guard active != isMicrophoneActive else { return }
+        isMicrophoneActive = active
+
+        if active {
+            let activelyPlaying = currentProcess?.isRunning == true
+
+            // Requirement: if mic starts while voice is already playing, cancel all queued work at that moment.
+            guard activelyPlaying else { return }
+
+            let pendingIds = allPendingHistoryIdsLocked()
+            let activeId = currentJobHistoryId
+
+            queuesByKey.removeAll()
+            queueOrder.removeAll()
+            terminateCurrentProcessLocked()
+            currentJobHistoryId = nil
+            currentQueueKey = nil
+            currentRunNonce = nil
+            isPlaying = false
+
+            for id in pendingIds {
+                RequestHistoryStore.shared.updateStatus(id: id, to: .cancelled)
+            }
+            if let activeId {
+                RequestHistoryStore.shared.updateStatus(id: activeId, to: .interrupted)
+            }
+        } else {
+            // Mic inactive again, resume queued playback.
+            startNextIfNeededLocked()
         }
     }
 
     private func startNextIfNeededLocked() {
-        guard !isPlaying, !pendingJobs.isEmpty else { return }
-        let job = pendingJobs.removeFirst()
+        guard !isPlaying, !isMicrophoneActive else { return }
+        guard let (queueKey, job) = dequeueNextJobLocked() else { return }
+
         isPlaying = true
         currentJobHistoryId = job.historyEntryId
+        currentQueueKey = queueKey
+
+        let runNonce = UUID()
+        currentRunNonce = runNonce
+
         RequestHistoryStore.shared.updateStatus(
             id: job.historyEntryId,
             to: .playing,
@@ -818,24 +1017,23 @@ final class SpeechPlaybackCoordinator {
         )
 
         Task { [weak self] in
-            await self?.process(job: job)
+            await self?.process(job: job, runNonce: runNonce)
         }
     }
 
-    private func finishCurrent() {
-        queue.async {
-            self.currentProcess = nil
-            self.currentJobHistoryId = nil
-            self.isPlaying = false
-            self.startNextIfNeededLocked()
-        }
-    }
-
-    private func process(job: SpeechJob) async {
+    private func process(job: SpeechJob, runNonce: UUID) async {
         var finalStatus: RequestPlaybackStatus = .played
 
         do {
             let audioData = try await synthesize(job: job)
+
+            guard await waitUntilMicrophoneInactive(runNonce: runNonce) else {
+                return
+            }
+            guard shouldContinue(runNonce: runNonce) else {
+                return
+            }
+
             try await play(audioData: audioData)
         } catch {
             finalStatus = .failed
@@ -848,7 +1046,43 @@ final class SpeechPlaybackCoordinator {
             unlessCurrentIn: [.cancelled, .interrupted]
         )
 
-        finishCurrent()
+        finishCurrent(runNonce: runNonce)
+    }
+
+    private func finishCurrent(runNonce: UUID) {
+        queue.async {
+            guard self.currentRunNonce == runNonce else { return }
+
+            self.currentProcess = nil
+            self.currentJobHistoryId = nil
+            self.currentQueueKey = nil
+            self.currentRunNonce = nil
+            self.isPlaying = false
+            self.startNextIfNeededLocked()
+        }
+    }
+
+    private func shouldContinue(runNonce: UUID) -> Bool {
+        queue.sync {
+            currentRunNonce == runNonce
+        }
+    }
+
+    private func waitUntilMicrophoneInactive(runNonce: UUID) async -> Bool {
+        while true {
+            let snapshot = queue.sync { (isMicrophoneActive, currentRunNonce == runNonce) }
+            let micActive = snapshot.0
+            let runStillValid = snapshot.1
+
+            if !runStillValid {
+                return false
+            }
+            if !micActive {
+                return true
+            }
+
+            try? await Task.sleep(nanoseconds: 150_000_000)
+        }
     }
 
     private func synthesize(job: SpeechJob) async throws -> Data {
@@ -943,7 +1177,56 @@ final class SpeechPlaybackCoordinator {
         request.httpMethod = "POST"
         _ = try? await URLSession.shared.data(for: request)
     }
+
+    private func queueKey(sourceApp: String?, sessionId: String?) -> String {
+        let app = normalizedSourceApp(sourceApp)
+        let session = normalizedSessionId(sessionId)
+        return "\(app)::\(session)"
+    }
+
+    private func normalizedSourceApp(_ sourceApp: String?) -> String {
+        let trimmed = sourceApp?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (trimmed?.isEmpty == false) ? trimmed! : "unknown"
+    }
+
+    private func normalizedSessionId(_ sessionId: String?) -> String {
+        let trimmed = sessionId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (trimmed?.isEmpty == false) ? trimmed! : "__none__"
+    }
+
+    private func dequeueNextJobLocked() -> (String, SpeechJob)? {
+        while !queueOrder.isEmpty {
+            let key = queueOrder.removeFirst()
+
+            guard var jobs = queuesByKey[key], !jobs.isEmpty else {
+                queuesByKey.removeValue(forKey: key)
+                continue
+            }
+
+            let job = jobs.removeFirst()
+
+            if jobs.isEmpty {
+                queuesByKey.removeValue(forKey: key)
+            } else {
+                queuesByKey[key] = jobs
+                queueOrder.append(key)
+            }
+
+            return (key, job)
+        }
+
+        return nil
+    }
+
+    private func allPendingHistoryIdsLocked() -> [UUID] {
+        queuesByKey.values.flatMap { $0.map(\.historyEntryId) }
+    }
+
+    private func pendingCountLocked() -> Int {
+        queuesByKey.values.reduce(0) { $0 + $1.count }
+    }
 }
+
 
 final class LocalSpeechBroker {
     private let listener: NWListener
@@ -1038,7 +1321,7 @@ final class LocalSpeechBroker {
         switch request.type {
         case "health":
             let state = coordinator.state()
-            send(response: .success(pending: state.pending, playing: state.playing), on: connection)
+            send(response: .success(pending: state.pending, playing: state.playing, currentQueue: state.currentQueue), on: connection)
 
         case "speak":
             guard let text = request.text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -1058,7 +1341,7 @@ final class LocalSpeechBroker {
         case "stop":
             coordinator.stopAll()
             let state = coordinator.state()
-            send(response: .success(pending: state.pending, playing: state.playing), on: connection)
+            send(response: .success(pending: state.pending, playing: state.playing, currentQueue: state.currentQueue), on: connection)
 
         default:
             send(response: .failure("Unknown command: \(request.type)"), on: connection)
