@@ -25,6 +25,7 @@ The `ptts` command lets any application use TTS. By default it enqueues speech i
 ```bash
 ptts "Hello, world!"
 ptts --voice alba "Good morning!"
+ptts --session-id my-session-123 "Scoped to one session queue"
 echo "Text from a pipe" | ptts
 ptts --list-voices
 ptts --stop
@@ -55,23 +56,54 @@ Endpoints:
 
 ### Local Broker Queue (NDJSON over TCP)
 
-For centralized playback, clients can connect to `127.0.0.1:18081` and send one JSON object per line:
+For centralized playback, clients connect to `127.0.0.1:18081` and send one JSON object per line.
+
+Request examples:
 
 ```json
-{"type":"speak","text":"Hello","voice":"fantine","sourceApp":"pi","sessionId":"..."}
+{"type":"speak","text":"Hello","voice":"fantine","sourceApp":"pi","sessionId":"session-abc","pid":12345}
+{"type":"health"}
+{"type":"stop"}
 ```
 
-Other commands:
-- `{"type":"health"}`
-- `{"type":"stop"}`
+`type: "speak"` fields:
+- `text` (required)
+- `voice` (optional)
+- `sourceApp` (optional)
+- `sessionId` (optional)
+- `pid` (optional)
+
+Response fields (depending on command):
+- `ok`
+- `queued`
+- `pending`
+- `playing`
+- `currentQueue`
+- `error`
+
+Queueing behavior:
+- Requests are grouped by queue key: `sourceApp + sessionId`
+- Missing session IDs are grouped into one shared session bucket
+- Scheduler processes queues fairly in round-robin order
+- If `voice` is omitted, Loqui auto-assigns per-queue voices from:
+  - `fantine`, `alba`, `cosette`, `marius`, `azelma`
+  - If more than 5 active queues, assignment cycles
+
+Detailed IPC notes: `docs/IPC.md`
 
 ### Voices
 
 Seven voices are available: `fantine` (default), `alba`, `marius`, `cosette`, `eponine`, `azelma`, `javert`. You can change the default voice in the menubar settings.
 
+### Microphone-aware playback
+
+Loqui is microphone-aware when using broker playback:
+- If the microphone becomes active while Loqui is speaking, current playback is interrupted and already-queued items are cancelled.
+- If the microphone is already active before playback starts, queued items wait and resume after microphone activity ends.
+
 ### With Pi
 
-The bundled Pi extension intercepts `<voice>` tags from the assistant and enqueues them to Loqui's local broker for centralized playback:
+The bundled Pi extension intercepts `<voice>` tags from the assistant and enqueues them to Loqui's local broker for centralized playback. It sends `sourceApp`, `sessionId`, and `pid` metadata so Loqui can isolate per-session queues:
 
 ```
 <voice>Found the bug. It was an off-by-one error in the loop.</voice>
@@ -104,7 +136,10 @@ The app ends up in `.build/Loqui.app`. The build script compiles the Rust TTS se
 └─────────────────┘     └──────────────────┘     └─────────┘
 ```
 
-Loqui runs as a menubar app. It starts a local HTTP server on port 18080 and a local broker queue on port 18081. Applications can send text via HTTP/`ptts` for raw audio workflows, or use the broker for centralized playback and queueing.
+Loqui runs as a menubar app. It starts a local HTTP server on port 18080 and a local broker queue on port 18081.
+
+- HTTP (`/stream`, `/generate`) is for raw synthesis workflows.
+- Broker (`18081`) is the IPC path for centralized queueing, scheduling, and playback.
 
 ## Troubleshooting
 

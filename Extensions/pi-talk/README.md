@@ -6,10 +6,10 @@ Text-to-speech extension for [Pi coding agent](https://github.com/mariozechner/p
 
 ## Features
 
-- 🔊 **Local TTS** - No cloud APIs, runs entirely on your Mac
-- 🎭 **Multiple voices** - 7 different voice options
-- 🧠 **Central playback** - Pi sends speech jobs to Loqui's local broker queue
-- 🎛️ **Configurable** - Toggle verbosity, mute, change voices
+- **Local TTS** - No cloud APIs, runs entirely on your Mac
+- **Multiple voices** - 7 different voice options
+- **Central playback** - Pi sends speech jobs to Loqui's local broker queue
+- **Configurable** - Toggle verbosity, mute, change voices
 
 ## Requirements
 
@@ -51,8 +51,8 @@ Press **Cmd+.** to stop speech at any time (requires Loqui.app running).
 
 1. The extension injects a system prompt that teaches Pi to use `<voice>` tags
 2. When Pi responds, the extension extracts `<voice>` content
-3. The extension sends speech jobs to Loqui's local broker (`127.0.0.1:18081`)
-4. Loqui synthesizes and plays audio centrally (no cloud, no API keys)
+3. The extension sends speech jobs to Loqui's local broker (`127.0.0.1:18081`), including `sourceApp`, `sessionId`, and `pid`
+4. Loqui schedules per-session queues and plays audio centrally (no cloud, no API keys)
 
 ## Credits
 
