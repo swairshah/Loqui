@@ -40,6 +40,9 @@ Guidelines for <voice> content:
 - Summarize what you're doing or found, don't read code/details verbatim
 - Use natural speech patterns, contractions, casual tone
 - Place <voice> tags at natural pause points in your response
+- Use ONLY <voice>...</voice> tags for speech
+- Never use other tags anywhere (no <emphasis>, <strong>, SSML, XML, or HTML tags)
+- Never nest tags inside <voice>; keep voice text plain
 - For code: describe what it does, don't read the code itself
 - For errors: summarize the issue conversationally
 - For confirmations: keep it simple like "Done!" or "Got it, working on that."
@@ -64,6 +67,9 @@ Guidelines for <voice> content:
 - Use natural speech patterns, contractions, casual tone
 - Multiple <voice> tags per response is encouraged
 - Speak your thinking process, questions, and follow-ups
+- Use ONLY <voice>...</voice> tags for speech
+- Never use other tags anywhere (no <emphasis>, <strong>, SSML, XML, or HTML tags)
+- Never nest tags inside <voice>; keep voice text plain
 - For code: describe what it does (don't read the code itself)
 - For file contents and technical details: summarize rather than read verbatim
 - For errors: explain what went wrong conversationally
@@ -107,9 +113,11 @@ export default function (pi: ExtensionAPI) {
   let currentVoice = "auto";  // Current TTS voice ("auto" = let Loqui assign per-session)
   let currentSessionId: string | undefined;
 
-  // Streaming state
-  let voiceBuffer = "";
-  let processedUpTo = 0;
+  // Streaming parser state
+  let lastFullText = "";
+  let parserBuffer = "";
+  let insideVoice = false;
+  let speakBuffer = "";
 
   function sendBrokerCommand(command: BrokerRequest, timeoutMs = 2500): Promise<BrokerResponse> {
     return new Promise((resolve, reject) => {
@@ -198,21 +206,9 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  // Extract <voice> tags from text
-  function extractVoiceTags(text: string, fromIndex: number): { content: string; endIndex: number }[] {
-    const results: { content: string; endIndex: number }[] = [];
-    const regex = /<voice>([\s\S]*?)<\/voice>/g;
-    regex.lastIndex = fromIndex;
-
-    let match;
-    while ((match = regex.exec(text)) !== null) {
-      results.push({
-        content: match[1].trim(),
-        endIndex: match.index + match[0].length,
-      });
-    }
-
-    return results;
+  // Strip any accidental nested markup from voice content (e.g. <emphasis>)
+  function sanitizeVoiceContent(text: string): string {
+    return text.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
   }
 
   async function enqueueSpeech(text: string) {
@@ -237,9 +233,99 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  // Process streaming text for voice tags
+  function longestTagPrefixSuffix(text: string, tag: string): number {
+    const max = Math.min(text.length, tag.length - 1);
+    for (let len = max; len > 0; len--) {
+      if (text.endsWith(tag.slice(0, len))) return len;
+    }
+    return 0;
+  }
+
+  function flushSpeakBuffer(force = false) {
+    if (!speakBuffer.trim()) return;
+
+    if (force) {
+      const chunk = sanitizeVoiceContent(speakBuffer);
+      speakBuffer = "";
+      if (chunk) void enqueueSpeech(chunk);
+      return;
+    }
+
+    // Prefer sentence-ish chunks for better prosody while still low-latency.
+    let splitAt = -1;
+    for (let i = 0; i < speakBuffer.length; i++) {
+      const ch = speakBuffer[i];
+      const next = speakBuffer[i + 1] ?? "";
+      if ((ch === "." || ch === "!" || ch === "?" || ch === "…") && (!next || /[\s"'\)\]]/.test(next))) {
+        splitAt = i + 1;
+      }
+    }
+
+    if (splitAt > 0) {
+      const chunk = sanitizeVoiceContent(speakBuffer.slice(0, splitAt));
+      speakBuffer = speakBuffer.slice(splitAt).replace(/^\s+/, "");
+      if (chunk) void enqueueSpeech(chunk);
+      return;
+    }
+
+    // Fallback: flush long chunks at a word boundary.
+    if (speakBuffer.length >= 140) {
+      const preferred = 110;
+      let split = speakBuffer.lastIndexOf(" ", preferred);
+      if (split < 60) split = preferred;
+      const chunk = sanitizeVoiceContent(speakBuffer.slice(0, split));
+      speakBuffer = speakBuffer.slice(split).replace(/^\s+/, "");
+      if (chunk) void enqueueSpeech(chunk);
+    }
+  }
+
+  function streamVoiceText(text: string, forceFlush = false) {
+    if (text) speakBuffer += text;
+    flushSpeakBuffer(forceFlush);
+  }
+
+  function processDelta(delta: string) {
+    if (!delta) return;
+
+    parserBuffer += delta;
+
+    while (parserBuffer.length > 0) {
+      if (!insideVoice) {
+        const openIdx = parserBuffer.indexOf("<voice>");
+        if (openIdx >= 0) {
+          parserBuffer = parserBuffer.slice(openIdx + "<voice>".length);
+          insideVoice = true;
+          continue;
+        }
+
+        const keep = longestTagPrefixSuffix(parserBuffer, "<voice>");
+        parserBuffer = keep > 0 ? parserBuffer.slice(-keep) : "";
+        return;
+      }
+
+      const closeIdx = parserBuffer.indexOf("</voice>");
+      if (closeIdx >= 0) {
+        const voiceText = parserBuffer.slice(0, closeIdx);
+        streamVoiceText(voiceText, true);
+        parserBuffer = parserBuffer.slice(closeIdx + "</voice>".length);
+        insideVoice = false;
+        continue;
+      }
+
+      const keep = longestTagPrefixSuffix(parserBuffer, "</voice>");
+      const emitLen = parserBuffer.length - keep;
+      if (emitLen > 0) {
+        const textToSpeak = parserBuffer.slice(0, emitLen);
+        streamVoiceText(textToSpeak, false);
+      }
+      parserBuffer = keep > 0 ? parserBuffer.slice(-keep) : "";
+      return;
+    }
+  }
+
+  // Process streaming text for voice tags (start speaking as soon as <voice> opens)
   async function processStreamingText(fullText: string) {
-    if (!ttsEnabled) return;
+    if (!ttsEnabled || ttsMuted) return;
 
     // Retry server check if not ready
     if (!serverReady) {
@@ -247,23 +333,34 @@ export default function (pi: ExtensionAPI) {
       if (!serverReady) return;
     }
 
-    voiceBuffer = fullText;
-
-    // Find complete <voice> tags we haven't processed yet
-    const voiceTags = extractVoiceTags(voiceBuffer, processedUpTo);
-
-    for (const tag of voiceTags) {
-      if (tag.content) {
-        // Fire-and-forget to avoid blocking token stream updates
-        void enqueueSpeech(tag.content);
-      }
-      processedUpTo = tag.endIndex;
+    let delta = "";
+    if (fullText.startsWith(lastFullText)) {
+      delta = fullText.slice(lastFullText.length);
+    } else {
+      // Stream was re-written (rare). Reset parser to avoid corrupt state.
+      parserBuffer = "";
+      insideVoice = false;
+      speakBuffer = "";
+      delta = fullText;
     }
+
+    lastFullText = fullText;
+    processDelta(delta);
   }
 
-  function resetStreamingState() {
-    voiceBuffer = "";
-    processedUpTo = 0;
+  function resetStreamingState(flushRemainder = false) {
+    if (flushRemainder) {
+      if (insideVoice && parserBuffer) {
+        streamVoiceText(parserBuffer, true);
+      } else {
+        flushSpeakBuffer(true);
+      }
+    }
+
+    lastFullText = "";
+    parserBuffer = "";
+    insideVoice = false;
+    speakBuffer = "";
   }
 
   // Inject voice prompt into system prompt (only if TTS enabled)
@@ -328,7 +425,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("message_end", async (event) => {
     if (event.message.role === "assistant") {
-      resetStreamingState();
+      resetStreamingState(true);
     }
   });
 
