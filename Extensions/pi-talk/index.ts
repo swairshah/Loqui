@@ -22,6 +22,12 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import net from "node:net";
 import process from "node:process";
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
+
+// Inbox configuration for receiving messages from external apps
+const INBOX_BASE_DIR = path.join(os.homedir(), ".pi", "agent", "pitalk-inbox");
 
 // Configuration - matches Loqui defaults
 const TTS_PORT = 18080;
@@ -119,25 +125,116 @@ export default function (pi: ExtensionAPI) {
   let insideVoice = false;
   let speakBuffer = "";
 
+  // Inbox watcher state
+  let inboxWatcher: fs.FSWatcher | null = null;
+  let inboxDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  const myPid = process.pid;
+  const myInboxDir = path.join(INBOX_BASE_DIR, String(myPid));
+
+  // Ensure inbox directory exists
+  function ensureInboxDir() {
+    try {
+      fs.mkdirSync(myInboxDir, { recursive: true });
+    } catch {
+      // Ignore errors
+    }
+  }
+
+  // Process all pending message files in inbox
+  function processInboxMessages() {
+    try {
+      const files = fs.readdirSync(myInboxDir).filter(f => f.endsWith(".json")).sort();
+      for (const file of files) {
+        const filePath = path.join(myInboxDir, file);
+        try {
+          const content = fs.readFileSync(filePath, "utf-8");
+          const msg = JSON.parse(content);
+          
+          if (msg.text) {
+            // Inject the message into pi
+            pi.sendMessage(
+              { customType: "voice_input", content: msg.text, display: true },
+              { triggerTurn: true }
+            );
+          }
+          
+          // Delete the file after processing
+          fs.unlinkSync(filePath);
+        } catch {
+          // Ignore individual file errors, try to delete anyway
+          try { fs.unlinkSync(filePath); } catch { /* ignore */ }
+        }
+      }
+    } catch {
+      // Ignore read errors
+    }
+  }
+
+  // Start watching the inbox directory
+  function startInboxWatcher() {
+    if (inboxWatcher) return;
+    
+    ensureInboxDir();
+    processInboxMessages(); // Process any pending messages
+    
+    try {
+      inboxWatcher = fs.watch(myInboxDir, () => {
+        // Debounce rapid events
+        if (inboxDebounceTimer) clearTimeout(inboxDebounceTimer);
+        inboxDebounceTimer = setTimeout(() => {
+          inboxDebounceTimer = null;
+          processInboxMessages();
+        }, 50);
+      });
+      
+      inboxWatcher.on("error", () => {
+        stopInboxWatcher();
+      });
+    } catch {
+      // Ignore watcher errors
+    }
+  }
+
+  // Stop the inbox watcher
+  function stopInboxWatcher() {
+    if (inboxDebounceTimer) {
+      clearTimeout(inboxDebounceTimer);
+      inboxDebounceTimer = null;
+    }
+    if (inboxWatcher) {
+      inboxWatcher.close();
+      inboxWatcher = null;
+    }
+  }
+
   function sendBrokerCommand(command: BrokerRequest, timeoutMs = 2500): Promise<BrokerResponse> {
     return new Promise((resolve, reject) => {
-      const socket = net.createConnection({ host: TTS_HOST, port: BROKER_PORT });
-      socket.setEncoding("utf8");
-
       let settled = false;
       let buffer = "";
+      let timeout: ReturnType<typeof setTimeout>;
 
       const finish = (fn: () => void) => {
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
-        fn();
+        try {
+          fn();
+        } catch {
+          // Ignore finish callback errors
+        }
       };
 
-      const timeout = setTimeout(() => {
+      // Attach error handler immediately after creating socket to avoid unhandled connection errors.
+      const socket = net.createConnection({ host: TTS_HOST, port: BROKER_PORT });
+      socket.on("error", () => {
+        finish(() => reject(new Error("Connection failed")));
+      });
+      socket.setEncoding("utf8");
+
+      timeout = setTimeout(() => {
         finish(() => {
           socket.destroy();
-          reject(new Error("Loqui broker timeout"));
+          reject(new Error("Broker timeout"));
         });
       }, timeoutMs);
 
@@ -166,10 +263,6 @@ export default function (pi: ExtensionAPI) {
         });
       });
 
-      socket.on("error", (err) => {
-        finish(() => reject(err));
-      });
-
       socket.on("end", () => {
         if (settled) return;
         const line = buffer.trim();
@@ -191,13 +284,19 @@ export default function (pi: ExtensionAPI) {
   // Check if Loqui server + broker are running
   async function checkServer(): Promise<boolean> {
     try {
-      const res = await fetch(`http://${TTS_HOST}:${TTS_PORT}/health`);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 1500);
+
+      const res = await fetch(`http://${TTS_HOST}:${TTS_PORT}/health`, {
+        signal: controller.signal,
+      }).finally(() => clearTimeout(timeoutId));
+
       if (!res.ok) {
         serverReady = false;
         return false;
       }
 
-      const broker = await sendBrokerCommand({ type: "health" });
+      const broker = await sendBrokerCommand({ type: "health" }, 1500);
       serverReady = broker.ok === true;
       return serverReady;
     } catch {
@@ -214,6 +313,9 @@ export default function (pi: ExtensionAPI) {
   async function enqueueSpeech(text: string) {
     if (!text.trim()) return;
 
+    // Skip silently when server is known down to avoid log spam.
+    if (!serverReady) return;
+
     try {
       const response = await sendBrokerCommand({
         type: "speak",
@@ -227,8 +329,8 @@ export default function (pi: ExtensionAPI) {
       if (!response.ok) {
         console.log("[TTS] Broker rejected speech:", response.error ?? "unknown error");
       }
-    } catch (err) {
-      console.log("[TTS] Broker error:", err);
+    } catch {
+      // Connection likely failed; mark not ready and fail silently.
       serverReady = false;
     }
   }
@@ -377,6 +479,9 @@ export default function (pi: ExtensionAPI) {
     currentSessionId = ctx.sessionManager.getSessionId();
     serverWarningShown = false;  // Reset for new session
 
+    // Start inbox watcher for receiving messages from external apps
+    startInboxWatcher();
+
     const ready = await checkServer();
     if (ttsEnabled) {
       if (ready) {
@@ -401,11 +506,15 @@ export default function (pi: ExtensionAPI) {
     currentSessionId = ctx.sessionManager.getSessionId();
   });
 
-  pi.on("message_start", async (event) => {
+  pi.on("message_start", async (event, ctx) => {
     if (event.message.role === "assistant") {
       resetStreamingState();
       // Re-check server in case it was started/stopped
+      const wasReady = serverReady;
       await checkServer();
+      if (wasReady !== serverReady) {
+        updateStatus(ctx);
+      }
     }
   });
 
@@ -426,6 +535,17 @@ export default function (pi: ExtensionAPI) {
   pi.on("message_end", async (event) => {
     if (event.message.role === "assistant") {
       resetStreamingState(true);
+    }
+  });
+
+  // Cleanup on session shutdown
+  pi.on("session_shutdown", async () => {
+    stopInboxWatcher();
+    // Try to remove inbox directory
+    try {
+      fs.rmSync(myInboxDir, { recursive: true, force: true });
+    } catch {
+      // Ignore cleanup errors
     }
   });
 
