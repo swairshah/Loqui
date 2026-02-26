@@ -479,6 +479,9 @@ export default function (pi: ExtensionAPI) {
     currentSessionId = ctx.sessionManager.getSessionId();
     serverWarningShown = false;  // Reset for new session
 
+    // Show PID in status bar (used by PiTalk jump handler to identify panes)
+    ctx.ui.setStatus("pid", `πid${process.pid}`);
+
     // Start inbox watcher for receiving messages from external apps
     startInboxWatcher();
 
