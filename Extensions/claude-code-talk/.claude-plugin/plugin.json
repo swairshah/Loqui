@@ -1,0 +1,8 @@
+{
+  "name": "loqui-tts",
+  "version": "1.0.0",
+  "description": "Text-to-speech for Claude Code using Loqui. Speaks <voice> tagged content from assistant responses.",
+  "author": {
+    "name": "Swair Shah"
+  }
+}

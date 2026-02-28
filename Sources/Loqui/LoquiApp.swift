@@ -18,7 +18,23 @@ struct LoquiApp: App {
     }
 }
 
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    private enum MenuItemTag {
+        static let status = 100
+        static let dockIcon = 101
+        static let serverEnabled = 102
+        static let activeSessions = 200
+        static let queue = 201
+        static let history = 202
+    }
+
+    private struct ActiveSessionSummary {
+        let sourceApp: String
+        let sessionId: String?
+        let lastMessageAt: Date
+        let queuedCount: Int
+    }
+
     var statusItem: NSStatusItem!
     var serverProcess: Process?
     var isServerRunning = false
@@ -29,6 +45,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var localBroker: LocalSpeechBroker?
     var micMonitor: MicrophoneActivityMonitor?
     let brokerPort = 18081
+    private var serverEnabledSwitch: NSSwitch?
+    private var isStoppingServer = false
+
+    private let activeSessionWindow: TimeInterval = 5 * 60
+    private let maxMenuRowsPerSection = 8
+    private lazy var relativeDateFormatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        return formatter
+    }()
     
     // Configuration
     let serverHost = "127.0.0.1"
@@ -48,6 +74,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
     
+    var serverEnabled: Bool {
+        get {
+            if UserDefaults.standard.object(forKey: "serverEnabled") == nil {
+                return true
+            }
+            return UserDefaults.standard.bool(forKey: "serverEnabled")
+        }
+        set {
+            setServerEnabled(newValue)
+        }
+    }
+
     // Read from UserDefaults (synced with @AppStorage in SettingsView)
     var serverPort: Int {
         let port = UserDefaults.standard.integer(forKey: "ttsPort")
@@ -56,6 +94,33 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     var selectedVoice: String {
         UserDefaults.standard.string(forKey: "ttsVoice") ?? "fantine"
+    }
+
+    func setServerEnabled(_ enabled: Bool) {
+        let oldValue = serverEnabled
+        UserDefaults.standard.set(enabled, forKey: "serverEnabled")
+        syncServerEnabledSwitchState()
+
+        guard oldValue != enabled else { return }
+
+        if enabled {
+            startLocalBroker()
+            startServer()
+        } else {
+            speechCoordinator?.stopAll()
+            stopLocalBroker()
+            stopServer()
+            updateStatusIcon(running: false)
+        }
+    }
+
+    func syncServerEnabledSwitchState() {
+        serverEnabledSwitch?.state = serverEnabled ? .on : .off
+    }
+
+    private func stopLocalBroker() {
+        localBroker?.stop()
+        localBroker = nil
     }
     
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -74,8 +139,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         micMonitor?.start()
 
-        startLocalBroker()
-        startServer()
+        syncServerEnabledSwitchState()
+        if serverEnabled {
+            startLocalBroker()
+            startServer()
+        } else {
+            updateStatusIcon(running: false)
+        }
     }
     
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -98,7 +168,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     func applicationWillTerminate(_ notification: Notification) {
         micMonitor?.stop()
-        localBroker?.stop()
+        stopLocalBroker()
         speechCoordinator?.stopAll()
         stopServer()
         if let hotKeyRef = hotKeyRef {
@@ -114,39 +184,268 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func setupMenuBar() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         updateStatusIcon(running: false)
-        
+
         let menu = NSMenu()
-        
+        menu.delegate = self
+
         let statusMenuItem = NSMenuItem(title: "Server: Starting...", action: nil, keyEquivalent: "")
-        statusMenuItem.tag = 100
+        statusMenuItem.tag = MenuItemTag.status
         menu.addItem(statusMenuItem)
-        
+
+        menu.addItem(makeServerToggleMenuItem())
         menu.addItem(NSMenuItem.separator())
-        
+
+        let activeSessionsItem = NSMenuItem(title: "Active Sessions (0)", action: nil, keyEquivalent: "")
+        activeSessionsItem.tag = MenuItemTag.activeSessions
+        menu.addItem(activeSessionsItem)
+
+        let queueItem = NSMenuItem(title: "Queue (0)", action: nil, keyEquivalent: "")
+        queueItem.tag = MenuItemTag.queue
+        menu.addItem(queueItem)
+
+        let historyItem = NSMenuItem(title: "History (0)", action: nil, keyEquivalent: "")
+        historyItem.tag = MenuItemTag.history
+        menu.addItem(historyItem)
+
+        menu.addItem(NSMenuItem.separator())
+
         let stopSpeechItem = NSMenuItem(title: "Stop Speech", action: #selector(stopCurrentSpeech), keyEquivalent: ".")
         stopSpeechItem.keyEquivalentModifierMask = [.command]
+        stopSpeechItem.target = self
         menu.addItem(stopSpeechItem)
-        
+
         menu.addItem(NSMenuItem.separator())
-        
-        menu.addItem(NSMenuItem(title: "Restart Server", action: #selector(restartServer), keyEquivalent: "r"))
-        
+
+        let restartItem = NSMenuItem(title: "Restart Server", action: #selector(restartServer), keyEquivalent: "r")
+        restartItem.target = self
+        menu.addItem(restartItem)
+
         menu.addItem(NSMenuItem.separator())
-        
-        menu.addItem(NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ","))
-        
+
+        let settingsItem = NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
+
         menu.addItem(NSMenuItem.separator())
-        
+
         let dockIconItem = NSMenuItem(title: "Show Dock Icon", action: #selector(toggleDockIcon), keyEquivalent: "")
-        dockIconItem.tag = 101
+        dockIconItem.tag = MenuItemTag.dockIcon
         dockIconItem.state = showDockIcon ? .on : .off
+        dockIconItem.target = self
         menu.addItem(dockIconItem)
-        
+
         menu.addItem(NSMenuItem.separator())
-        
-        menu.addItem(NSMenuItem(title: "Quit Loqui", action: #selector(quitApp), keyEquivalent: "q"))
-        
+
+        let quitItem = NSMenuItem(title: "Quit Loqui", action: #selector(quitApp), keyEquivalent: "q")
+        quitItem.target = self
+        menu.addItem(quitItem)
+
         statusItem.menu = menu
+        refreshSessionSectionsMenu()
+    }
+
+    private func makeServerToggleMenuItem() -> NSMenuItem {
+        let item = NSMenuItem()
+        item.tag = MenuItemTag.serverEnabled
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 220, height: 28))
+
+        let label = NSTextField(labelWithString: "Server Enabled")
+        label.font = .systemFont(ofSize: 13)
+        label.frame = NSRect(x: 10, y: 6, width: 130, height: 16)
+        container.addSubview(label)
+
+        let toggle = NSSwitch(frame: NSRect(x: 165, y: 3, width: 51, height: 24))
+        toggle.target = self
+        toggle.action = #selector(serverEnabledSwitchChanged(_:))
+        toggle.state = serverEnabled ? .on : .off
+        container.addSubview(toggle)
+
+        serverEnabledSwitch = toggle
+        item.view = container
+        return item
+    }
+
+    @objc private func serverEnabledSwitchChanged(_ sender: NSSwitch) {
+        setServerEnabled(sender.state == .on)
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        syncServerEnabledSwitchState()
+        refreshSessionSectionsMenu()
+    }
+
+    private func refreshSessionSectionsMenu() {
+        guard let menu = statusItem.menu else { return }
+
+        let entries = RequestHistoryStore.shared.entries
+        let activeSessions = buildActiveSessions(from: entries)
+        let queueEntries = entries
+            .filter { $0.status.isInQueue }
+            .sorted { $0.timestamp < $1.timestamp }
+        let historyEntries = entries
+            .filter { !$0.status.isInQueue }
+            .sorted { $0.timestamp > $1.timestamp }
+
+        if let activeItem = menu.item(withTag: MenuItemTag.activeSessions) {
+            activeItem.title = "Active Sessions (\(activeSessions.count))"
+            activeItem.submenu = makeActiveSessionsSubmenu(activeSessions)
+        }
+
+        if let queueItem = menu.item(withTag: MenuItemTag.queue) {
+            queueItem.title = "Queue (\(queueEntries.count))"
+            queueItem.submenu = makeQueueSubmenu(queueEntries)
+        }
+
+        if let historyItem = menu.item(withTag: MenuItemTag.history) {
+            historyItem.title = "History (\(historyEntries.count))"
+            historyItem.submenu = makeHistorySubmenu(historyEntries)
+        }
+    }
+
+    private func buildActiveSessions(from entries: [RequestHistoryEntry]) -> [ActiveSessionSummary] {
+        let cutoff = Date().addingTimeInterval(-activeSessionWindow)
+        var buckets: [String: ActiveSessionSummary] = [:]
+
+        for entry in entries {
+            let sourceApp = normalizedAppName(entry.sourceApp)
+            let sessionId = normalizedSessionId(entry.sessionId)
+            let key = "\(sourceApp)::\(sessionId ?? "__none__")"
+            let queuedIncrement = entry.status.isInQueue ? 1 : 0
+
+            if let existing = buckets[key] {
+                buckets[key] = ActiveSessionSummary(
+                    sourceApp: existing.sourceApp,
+                    sessionId: existing.sessionId,
+                    lastMessageAt: max(existing.lastMessageAt, entry.timestamp),
+                    queuedCount: existing.queuedCount + queuedIncrement
+                )
+            } else {
+                buckets[key] = ActiveSessionSummary(
+                    sourceApp: sourceApp,
+                    sessionId: sessionId,
+                    lastMessageAt: entry.timestamp,
+                    queuedCount: queuedIncrement
+                )
+            }
+        }
+
+        return buckets.values
+            .filter { $0.lastMessageAt >= cutoff }
+            .sorted { $0.lastMessageAt > $1.lastMessageAt }
+    }
+
+    private func makeActiveSessionsSubmenu(_ sessions: [ActiveSessionSummary]) -> NSMenu {
+        let submenu = NSMenu()
+
+        guard !sessions.isEmpty else {
+            submenu.addItem(makeDisabledMenuItem("No active sessions in the last 5m"))
+            return submenu
+        }
+
+        for session in sessions.prefix(maxMenuRowsPerSection) {
+            let relative = relativeDateFormatter.localizedString(for: session.lastMessageAt, relativeTo: Date())
+            let sessionLabel = shortSessionLabel(session.sessionId) ?? "No session"
+            var title = "\(session.sourceApp) [\(sessionLabel)] • \(relative)"
+            if session.queuedCount > 0 {
+                title += " • \(session.queuedCount) queued"
+            }
+            submenu.addItem(makeDisabledMenuItem(title))
+        }
+
+        if sessions.count > maxMenuRowsPerSection {
+            submenu.addItem(makeDisabledMenuItem("… \(sessions.count - maxMenuRowsPerSection) more"))
+        }
+
+        return submenu
+    }
+
+    private func makeQueueSubmenu(_ entries: [RequestHistoryEntry]) -> NSMenu {
+        let submenu = NSMenu()
+
+        guard !entries.isEmpty else {
+            submenu.addItem(makeDisabledMenuItem("Queue is clear"))
+            return submenu
+        }
+
+        for entry in entries.prefix(maxMenuRowsPerSection) {
+            let app = normalizedAppName(entry.sourceApp)
+            let text = trimmedSnippet(entry.text)
+            let relative = relativeDateFormatter.localizedString(for: entry.timestamp, relativeTo: Date())
+
+            if let session = shortSessionLabel(entry.sessionId) {
+                submenu.addItem(makeDisabledMenuItem("\(app) [\(session)] • \(text) • \(relative)"))
+            } else {
+                submenu.addItem(makeDisabledMenuItem("\(app) • \(text) • \(relative)"))
+            }
+        }
+
+        if entries.count > maxMenuRowsPerSection {
+            submenu.addItem(makeDisabledMenuItem("… \(entries.count - maxMenuRowsPerSection) more"))
+        }
+
+        return submenu
+    }
+
+    private func makeHistorySubmenu(_ entries: [RequestHistoryEntry]) -> NSMenu {
+        let submenu = NSMenu()
+
+        guard !entries.isEmpty else {
+            submenu.addItem(makeDisabledMenuItem("No history yet"))
+            return submenu
+        }
+
+        for entry in entries.prefix(maxMenuRowsPerSection) {
+            let status = entry.status.displayName
+            let text = trimmedSnippet(entry.text)
+            let relative = relativeDateFormatter.localizedString(for: entry.timestamp, relativeTo: Date())
+            submenu.addItem(makeDisabledMenuItem("[\(status)] \(text) • \(relative)"))
+        }
+
+        if entries.count > maxMenuRowsPerSection {
+            submenu.addItem(makeDisabledMenuItem("… \(entries.count - maxMenuRowsPerSection) more"))
+        }
+
+        submenu.addItem(NSMenuItem.separator())
+        let openHistoryItem = NSMenuItem(title: "Open Settings…", action: #selector(openSettings), keyEquivalent: "")
+        openHistoryItem.target = self
+        submenu.addItem(openHistoryItem)
+
+        return submenu
+    }
+
+    private func makeDisabledMenuItem(_ title: String) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        return item
+    }
+
+    private func normalizedAppName(_ sourceApp: String?) -> String {
+        let trimmed = sourceApp?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (trimmed?.isEmpty == false) ? trimmed! : "Unknown"
+    }
+
+    private func normalizedSessionId(_ sessionId: String?) -> String? {
+        let trimmed = sessionId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (trimmed?.isEmpty == false) ? trimmed : nil
+    }
+
+    private func shortSessionLabel(_ sessionId: String?) -> String? {
+        guard let sessionId = normalizedSessionId(sessionId) else { return nil }
+        let suffix = sessionId.count > 12 ? "…" : ""
+        return String(sessionId.prefix(12)) + suffix
+    }
+
+    private func trimmedSnippet(_ text: String, maxLength: Int = 50) -> String {
+        let collapsed = text
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard collapsed.count > maxLength else {
+            return collapsed
+        }
+
+        return String(collapsed.prefix(maxLength)) + "…"
     }
     
     func updateStatusIcon(running: Bool) {
@@ -163,8 +462,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         
         if let menu = statusItem.menu,
-           let statusItem = menu.item(withTag: 100) {
-            statusItem.title = running ? "Server: Running on port \(serverPort)" : "Server: Stopped"
+           let statusItem = menu.item(withTag: MenuItemTag.status) {
+            if !serverEnabled {
+                statusItem.title = "Server: Disabled"
+            } else {
+                statusItem.title = running ? "Server: Running on port \(serverPort)" : "Server: Stopped"
+            }
         }
         
         isServerRunning = running
@@ -195,7 +498,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         return nil
     }
-    
+
     // MARK: - Global Shortcut (Cmd+.)
     
     func setupGlobalShortcut() {
@@ -220,6 +523,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func startLocalBroker() {
+        guard serverEnabled else { return }
+        guard localBroker == nil else { return }
         guard let coordinator = speechCoordinator else { return }
         do {
             let broker = try LocalSpeechBroker(port: brokerPort, coordinator: coordinator)
@@ -347,6 +652,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func startServer() {
+        guard serverEnabled else {
+            updateStatusIcon(running: false)
+            return
+        }
+
+        if serverProcess?.isRunning == true {
+            return
+        }
+
         guard getServerBinaryPath() != nil else {
             showAlert(title: "Server Binary Not Found", 
                      message: "Could not find pocket-tts-cli. Please ensure it's installed or bundled with the app.")
@@ -398,9 +712,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         process.terminationHandler = { [weak self] process in
             DispatchQueue.main.async {
-                self?.updateStatusIcon(running: false)
-                if process.terminationStatus != 0 {
-                    self?.showAlert(title: "Server Stopped", 
+                guard let self else { return }
+                let wasStopping = self.isStoppingServer
+                self.isStoppingServer = false
+                self.serverProcess = nil
+                self.updateStatusIcon(running: false)
+
+                if !wasStopping, self.serverEnabled, process.terminationStatus != 0 {
+                    self.showAlert(title: "Server Stopped", 
                                    message: "TTS server exited with code \(process.terminationStatus)")
                 }
             }
@@ -421,6 +740,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func checkServerHealth() {
+        guard serverEnabled else { return }
+
         Task {
             do {
                 let url = URL(string: "http://\(serverHost):\(serverPort)/health")!
@@ -433,12 +754,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 } else {
                     // Retry after a delay
                     try await Task.sleep(nanoseconds: 2_000_000_000)
-                    checkServerHealth()
+                    if serverEnabled {
+                        checkServerHealth()
+                    }
                 }
             } catch {
                 // Server not ready yet, retry
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
-                if serverProcess?.isRunning == true {
+                if serverEnabled, serverProcess?.isRunning == true {
                     checkServerHealth()
                 }
             }
@@ -446,13 +769,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func stopServer() {
-        serverProcess?.terminate()
-        serverProcess = nil
+        if let process = serverProcess {
+            isStoppingServer = true
+            process.terminate()
+            serverProcess = nil
+        }
         updateStatusIcon(running: false)
     }
     
     @objc func restartServer() {
         stopServer()
+        guard serverEnabled else {
+            stopLocalBroker()
+            return
+        }
+
+        startLocalBroker()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
             self?.startServer()
         }
@@ -461,7 +793,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func toggleDockIcon() {
         showDockIcon = !showDockIcon
         // Update menu item state
-        if let menu = statusItem.menu, let item = menu.item(withTag: 101) {
+        if let menu = statusItem.menu, let item = menu.item(withTag: MenuItemTag.dockIcon) {
             item.state = showDockIcon ? .on : .off
         }
     }
@@ -871,7 +1203,8 @@ final class SpeechPlaybackCoordinator {
     private var isMicrophoneActive = false
 
     // Auto voice assignment for queues that don't specify voice.
-    private let autoVoicePool = ["fantine", "alba", "cosette", "marius", "azelma"]
+    // Note: `alba` is intentionally excluded from auto-rotation.
+    private let autoVoicePool = ["fantine", "cosette", "marius", "azelma"]
     private var autoVoiceByQueueKey: [String: String] = [:]
     private var autoVoiceCycleIndex = 0
 
@@ -943,7 +1276,7 @@ final class SpeechPlaybackCoordinator {
 
             queuesByKey.removeAll()
             queueOrder.removeAll()
-            autoVoiceByQueueKey.removeAll()
+            // Keep voice assignments so continued sessions retain their prior auto-voice.
             terminateCurrentProcessLocked()
             currentJobHistoryId = nil
             currentQueueKey = nil
@@ -987,7 +1320,7 @@ final class SpeechPlaybackCoordinator {
 
             queuesByKey.removeAll()
             queueOrder.removeAll()
-            autoVoiceByQueueKey.removeAll()
+            // Keep voice assignments so this queue key keeps the same voice after interruption.
             terminateCurrentProcessLocked()
             currentJobHistoryId = nil
             currentQueueKey = nil
@@ -1438,6 +1771,7 @@ struct GeneralSettingsView: View {
     @AppStorage("ttsPort") var port = 18080
     @AppStorage("launchAtLogin") var launchAtLogin = false
     @AppStorage("showDockIcon") var showDockIcon = true
+    @AppStorage("serverEnabled") var serverEnabled = true
     @State private var isPreviewPlaying = false
     @State private var portString = ""
     
@@ -1476,11 +1810,16 @@ struct GeneralSettingsView: View {
                     Button(isPreviewPlaying ? "Playing…" : "Preview") {
                         previewVoice(voice)
                     }
-                    .disabled(isPreviewPlaying)
+                    .disabled(isPreviewPlaying || !serverEnabled)
                 }
             }
 
             Section("Server") {
+                Toggle("Enable Server", isOn: $serverEnabled)
+                    .onChange(of: serverEnabled) { _ in
+                        updateServerEnabled()
+                    }
+
                 HStack {
                     Text("Port")
                     Spacer()
@@ -1494,7 +1833,7 @@ struct GeneralSettingsView: View {
                             restartServerForSettingsChange()
                         }
                     }
-                    .disabled(Int(portString) == port)
+                    .disabled(!serverEnabled || Int(portString) == port)
                 }
             }
 
@@ -1535,6 +1874,12 @@ struct GeneralSettingsView: View {
         }
     }
     
+    func updateServerEnabled() {
+        if let appDelegate = NSApp.delegate as? AppDelegate {
+            appDelegate.setServerEnabled(serverEnabled)
+        }
+    }
+
     func restartServerForSettingsChange() {
         // Find the app delegate and restart the server
         if let appDelegate = NSApp.delegate as? AppDelegate {

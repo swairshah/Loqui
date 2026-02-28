@@ -57,9 +57,9 @@ Rules:
 
 If `voice` is omitted in `speak`:
 - Loqui assigns a stable per-queue default from:
-  - `fantine`, `alba`, `cosette`, `marius`, `azelma`
+  - `fantine`, `cosette`, `marius`, `azelma`
 - Loqui tries to keep active queues on distinct voices.
-- If active queues exceed 5, assignment cycles.
+- If active queues exceed 4, assignment cycles.
 
 If `voice` is provided, it is used directly.
 
