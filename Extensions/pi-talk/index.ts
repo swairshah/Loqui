@@ -152,9 +152,11 @@ export default function (pi: ExtensionAPI) {
           
           if (msg.text) {
             // Inject the message into pi
+            // Support deliverAs: "steer" | "followUp" | "nextTurn" (default: "steer")
+            const deliverAs = msg.deliverAs || "steer";
             pi.sendMessage(
               { customType: "voice_input", content: msg.text, display: true },
-              { triggerTurn: true }
+              { triggerTurn: true, deliverAs },
             );
           }
           
