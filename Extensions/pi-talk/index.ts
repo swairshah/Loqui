@@ -510,6 +510,14 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("message_start", async (event, ctx) => {
+    if (event.message.role === "user") {
+      // User sent a new message — stop any queued/playing speech for THIS session.
+      // This prevents stale assistant speech from overlapping the new response.
+      if (serverReady) {
+        sendBrokerCommand({ type: "stop", sourceApp: "pi", sessionId: currentSessionId }).catch(() => {});
+      }
+    }
+
     if (event.message.role === "assistant") {
       resetStreamingState();
       // Re-check server in case it was started/stopped
@@ -651,7 +659,7 @@ export default function (pi: ExtensionAPI) {
     description: "Stop current speech",
     handler: async (_args, ctx) => {
       try {
-        await sendBrokerCommand({ type: "stop" });
+        await sendBrokerCommand({ type: "stop", sourceApp: "pi", sessionId: currentSessionId });
         ctx.ui.notify("Speech stopped", "info");
       } catch {
         ctx.ui.notify("Could not reach Loqui broker", "warning");
