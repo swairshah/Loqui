@@ -30,6 +30,10 @@ DerivedData/
 *.app
 bin/
 
+# Python caches
+__pycache__/
+*.pyc
+
 # Note: models/ is tracked - we bundle them with the app
 
 # Crash logs
