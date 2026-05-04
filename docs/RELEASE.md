@@ -19,7 +19,7 @@ Example:
 `scripts/release.sh` will:
 
 1. Update `CFBundleShortVersionString` in `scripts/build-app.sh`
-2. Build Loqui + `ptts`
+2. Build Loqui + `loqui`
 3. Bundle `pocket-tts-cli` + model files into `.build/Loqui.app`
 4. Sign the app
 5. Zip to `dist/Loqui-<version>.zip`

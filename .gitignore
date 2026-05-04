@@ -28,6 +28,7 @@ DerivedData/
 
 # App bundles (built outputs)
 *.app
+bin/
 
 # Note: models/ is tracked - we bundle them with the app
 

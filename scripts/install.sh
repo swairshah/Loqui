@@ -18,7 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 APP_PATH="$PROJECT_ROOT/.build/Loqui.app"
 EXTENSION_SRC="$PROJECT_ROOT/Extensions/pi"
-CLI_SRC="$PROJECT_ROOT/.build/release/ptts"
+CLI_SRC="$PROJECT_ROOT/.build/release/loqui-cli"
 
 # Check if running from the right directory
 if [ ! -d "$SCRIPT_DIR" ]; then
@@ -92,29 +92,15 @@ else
     echo -e "  ${YELLOW}  Run ./scripts/build-app.sh first to build the app${NC}"
 fi
 
-# Step 5: Install ptts CLI
+# Step 5: Install loqui CLI
 echo ""
-echo -e "${CYAN}[5/5]${NC} Installing ptts CLI..."
+echo -e "${CYAN}[5/5]${NC} Installing loqui CLI..."
 
 if [ -f "$CLI_SRC" ]; then
-    # Try /usr/local/bin first
-    if [ -w "/usr/local/bin" ] || mkdir -p /usr/local/bin 2>/dev/null; then
-        cp "$CLI_SRC" /usr/local/bin/ptts
-        chmod +x /usr/local/bin/ptts
-        echo -e "  ${GREEN}✓${NC} CLI installed to /usr/local/bin/ptts"
-    else
-        # Fall back to ~/.local/bin
-        mkdir -p "$HOME/.local/bin"
-        cp "$CLI_SRC" "$HOME/.local/bin/ptts"
-        chmod +x "$HOME/.local/bin/ptts"
-        echo -e "  ${GREEN}✓${NC} CLI installed to ~/.local/bin/ptts"
-        
-        # Check if ~/.local/bin is in PATH
-        if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
-            echo -e "  ${YELLOW}⚠${NC} Add ~/.local/bin to your PATH:"
-            echo -e "     ${YELLOW}echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.zshrc${NC}"
-        fi
-    fi
+    mkdir -p "$PROJECT_ROOT/bin"
+    cp "$CLI_SRC" "$PROJECT_ROOT/bin/loqui"
+    chmod +x "$PROJECT_ROOT/bin/loqui"
+    echo -e "  ${GREEN}✓${NC} CLI installed to $PROJECT_ROOT/bin/loqui"
 else
     echo -e "  ${YELLOW}⚠${NC} CLI not found at $CLI_SRC"
     echo -e "  ${YELLOW}  Run ./scripts/build-app.sh first to build${NC}"
@@ -142,9 +128,9 @@ echo "  /tts-stop   - Stop current speech"
 echo "  /tts-status - Show status"
 echo ""
 echo "CLI usage:"
-echo "  ptts \"Hello world\"        # Speak text"
-echo "  ptts -v alba \"Hello\"      # Different voice"
-echo "  echo \"Hello\" | ptts       # Pipe text"
+echo "  ./bin/loqui say \"Hello world\"        # Speak text"
+echo "  ./bin/loqui say -v alba \"Hello\"      # Different voice"
+echo "  echo \"Hello\" | ./bin/loqui say       # Pipe text"
 echo ""
 echo "Global shortcut: Cmd+Shift+. to stop speech"
 echo ""

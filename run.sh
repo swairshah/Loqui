@@ -5,7 +5,7 @@ cd "$(dirname "$0")"
 
 APP_PATH=".build/Loqui.app"
 APP_BIN="$APP_PATH/Contents/MacOS/Loqui"
-PTTS_BIN="$APP_PATH/Contents/MacOS/ptts"
+CLI_BIN="bin/loqui"
 
 # Colors
 RED='\033[0;31m'
@@ -15,13 +15,14 @@ NC='\033[0m'
 
 echo -e "${GREEN}=== Loqui Build & Run ===${NC}"
 
-# Kill existing Loqui + embedded server
+# Kill existing Loqui + old embedded server
 pkill -f "$APP_BIN" 2>/dev/null || true
 pkill -f "pocket-tts-cli serve --port 18080" 2>/dev/null || true
 
 # Build debug binaries
 echo -e "${YELLOW}Building (swift build)...${NC}"
-swift build
+swift build --product Loqui
+swift build --product loqui-cli
 
 # Ensure app bundle exists (created by scripts/build-app.sh)
 if [ ! -d "$APP_PATH" ]; then
@@ -33,13 +34,9 @@ fi
 # Replace app bundle binaries with fresh debug builds
 echo -e "${YELLOW}Updating app bundle binaries...${NC}"
 cp .build/debug/Loqui "$APP_BIN"
-cp .build/debug/ptts "$PTTS_BIN"
-
-# Keep CLI in PATH in sync (if local bin exists)
-if [ -d "$HOME/.local/bin" ]; then
-  cp .build/debug/ptts "$HOME/.local/bin/ptts"
-  chmod +x "$HOME/.local/bin/ptts"
-fi
+mkdir -p bin
+cp .build/debug/loqui-cli "$CLI_BIN"
+chmod +x "$CLI_BIN"
 
 # Launch app
 echo -e "${GREEN}Launching Loqui...${NC}"
@@ -53,16 +50,10 @@ else
   echo -e "${RED}Loqui process: not running${NC}"
 fi
 
-if curl -fsS http://127.0.0.1:18080/health >/dev/null 2>&1; then
-  echo -e "${GREEN}TTS server (18080): healthy${NC}"
+if "$CLI_BIN" status >/dev/null 2>&1; then
+  echo -e "${GREEN}Loqui socket: healthy${NC}"
 else
-  echo -e "${RED}TTS server (18080): not healthy yet${NC}"
-fi
-
-if nc -z 127.0.0.1 18081 >/dev/null 2>&1; then
-  echo -e "${GREEN}Broker (18081): listening${NC}"
-else
-  echo -e "${RED}Broker (18081): not listening${NC}"
+  echo -e "${RED}Loqui socket: not healthy yet${NC}"
 fi
 
 echo -e "${GREEN}Done.${NC}"
