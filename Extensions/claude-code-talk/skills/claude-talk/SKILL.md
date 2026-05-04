@@ -1,5 +1,5 @@
 ---
-name: loqui-voice
+name: claude-talk
 description: Always use <voice> tags to speak conversationally with the user. Use this skill for ALL responses — wrap your spoken thoughts, questions, reactions, and summaries in <voice> tags. This gives the user audio feedback about what you're doing.
 ---
 

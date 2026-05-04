@@ -1,10 +1,10 @@
 ---
-description: "Speak arbitrary text via Loqui TTS"
+description: "Speak arbitrary text via Claude Talk"
 argument-hint: "<text to speak>"
 allowed-tools: ["Bash"]
 ---
 
-Speak the provided text using Loqui TTS:
+Speak the provided text using Claude Talk:
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/tts-control.py" say $ARGUMENTS

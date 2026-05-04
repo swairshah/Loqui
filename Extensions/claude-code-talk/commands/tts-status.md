@@ -1,5 +1,5 @@
 ---
-description: "Show Loqui TTS status"
+description: "Show Claude Talk TTS status"
 allowed-tools: ["Bash"]
 ---
 

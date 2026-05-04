@@ -12,8 +12,7 @@ import sys
 import time
 from datetime import datetime
 
-TTS_HOST = "127.0.0.1"
-BROKER_PORT = 18081
+LOQUI_SOCKET = os.path.expanduser("~/Library/Application Support/Loqui/loqui.sock")
 STATE_FILE = "/tmp/loqui-tts-state.json"
 DEBUG_LOG = "/tmp/loqui-tts-debug.log"
 
@@ -55,7 +54,7 @@ def save_spoken(spoken):
 
 
 def send_to_broker(text, voice="auto", session_id="unknown", pid=None):
-    """Send a speak command to the Loqui broker via TCP/NDJSON."""
+    """Send a speak command to the Loqui broker via Unix socket NDJSON."""
     try:
         command = {
             "type": "speak",
@@ -68,9 +67,9 @@ def send_to_broker(text, voice="auto", session_id="unknown", pid=None):
         if pid:
             command["pid"] = pid
 
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(3)
-        sock.connect((TTS_HOST, BROKER_PORT))
+        sock.connect(LOQUI_SOCKET)
         sock.sendall(json.dumps(command).encode() + b"\n")
 
         # Read response
@@ -144,83 +143,66 @@ def main():
         debug("TTS disabled, exiting")
         sys.exit(0)
 
-    # Check if server was healthy at session start
-    if not state.get("server_ready", False):
-        debug("Server not ready, exiting")
+    # Skip stop-hook continuations to avoid duplicate speech
+    if input_data.get("stop_hook_active"):
+        debug("stop_hook_active=True, skipping")
         sys.exit(0)
 
     session_id = state.get("session_id", input_data.get("session_id", "unknown"))
     voice = state.get("voice", "auto")
+    pid = state.get("claude_pid", os.getpid())
     transcript_path = input_data.get("transcript_path", "")
 
-    debug(f"transcript: {transcript_path}")
-    debug(f"session_id: {session_id}")
+    # Prefer last_assistant_message — it's exactly the message that triggered this Stop hook,
+    # so there's no replay-history risk and no transcript-flush race.
+    last_msg = input_data.get("last_assistant_message")
+    full_text = ""
 
-    # Load already-spoken messages
-    spoken = load_spoken()
-    debug(f"already spoken: {len(spoken)}")
-
-    # Wait for the transcript to be written — Claude Code flushes AFTER the Stop hook fires.
-    # Retry a few times with short delays to catch the new assistant message.
-    assistant_messages = []
-    new_messages = []
-    for attempt in range(8):
-        assistant_messages = get_last_assistant_messages(transcript_path)
-        new_messages = [m for m in assistant_messages if m.get("uuid", "") not in spoken]
-        if new_messages:
-            debug(f"attempt {attempt}: found {len(new_messages)} new messages (total {len(assistant_messages)})")
-            break
-        delay = 0.15 if attempt < 3 else 0.3
-        debug(f"attempt {attempt}: no new messages yet ({len(assistant_messages)} total), waiting {delay}s...")
-        time.sleep(delay)
-
-    debug(f"assistant messages found: {len(assistant_messages)}, new: {len(new_messages)}")
-
-    if not new_messages:
-        debug("No new assistant messages after retries, exiting")
-        sys.exit(0)
-
-    # Use Claude Code's PID (stored by session-start) so PiTalk can send voice input back
-    pid = state.get("claude_pid", os.getpid())
-
-    new_spoken = 0
-    for msg in assistant_messages:
-        msg_uuid = msg.get("uuid", "")
-        if not msg_uuid or msg_uuid in spoken:
-            continue
-
-        # Extract text content
-        content = msg.get("message", {}).get("content", "")
+    if isinstance(last_msg, str) and last_msg.strip():
+        full_text = last_msg
+        debug(f"using last_assistant_message (str, {len(full_text)} chars)")
+    elif isinstance(last_msg, dict):
+        content = last_msg.get("content")
+        if content is None:
+            content = last_msg.get("message", {}).get("content", "")
         if isinstance(content, list):
-            text_parts = []
-            for part in content:
-                if isinstance(part, dict) and part.get("type") == "text":
-                    text_parts.append(part.get("text", ""))
-            full_text = " ".join(text_parts)
+            full_text = " ".join(
+                p.get("text", "") for p in content
+                if isinstance(p, dict) and p.get("type") == "text"
+            )
         elif isinstance(content, str):
             full_text = content
-        else:
-            continue
+        debug(f"using last_assistant_message (dict, {len(full_text)} chars)")
+    else:
+        # Fallback: poll the transcript for the latest assistant message.
+        debug("no last_assistant_message; falling back to transcript")
+        for attempt in range(8):
+            messages = get_last_assistant_messages(transcript_path)
+            if messages:
+                content = messages[-1].get("message", {}).get("content", "")
+                if isinstance(content, list):
+                    full_text = " ".join(
+                        p.get("text", "") for p in content
+                        if isinstance(p, dict) and p.get("type") == "text"
+                    )
+                elif isinstance(content, str):
+                    full_text = content
+                if full_text:
+                    break
+            time.sleep(0.15 if attempt < 3 else 0.3)
 
-        # Extract voice tags
-        voice_chunks = extract_voice_tags(full_text)
-        debug(f"  uuid={msg_uuid[:16]}: {len(voice_chunks)} voice chunks")
+    if not full_text:
+        debug("no text to speak")
+        sys.exit(0)
 
-        if voice_chunks:
-            # Send each voice chunk to the broker
-            for chunk in voice_chunks:
-                ok = send_to_broker(chunk, voice=voice, session_id=session_id, pid=pid)
-                debug(f"    sent '{chunk[:60]}...' ok={ok}")
+    voice_chunks = extract_voice_tags(full_text)
+    debug(f"{len(voice_chunks)} voice chunks")
 
-            # Mark as spoken
-            spoken.add(msg_uuid)
-            new_spoken += 1
+    for chunk in voice_chunks:
+        ok = send_to_broker(chunk, voice=voice, session_id=session_id, pid=pid)
+        debug(f"  sent '{chunk[:60]}' ok={ok}")
 
-    save_spoken(spoken)
-    debug(f"done. new spoken: {new_spoken}")
-    
-    # Print result so Claude Code logs it
-    print(json.dumps({"spoken": new_spoken}))
+    print(json.dumps({"spoken": len(voice_chunks)}))
     sys.exit(0)
 
 

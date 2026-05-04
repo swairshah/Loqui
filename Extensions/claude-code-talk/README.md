@@ -1,4 +1,4 @@
-# loqui-tts — Claude Code Plugin
+# claude-talk — Claude Code Plugin
 
 Text-to-speech for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) using [Loqui](https://github.com/swairshah/Loqui). Speaks `<voice>` tagged content from assistant responses.
 
@@ -40,11 +40,11 @@ claude --plugin-dir ./Extensions/claude-code-talk
 
 | Command | Description |
 |---------|-------------|
-| `/loqui-tts:tts` | Toggle TTS on/off |
-| `/loqui-tts:tts-stop` | Stop current speech |
-| `/loqui-tts:tts-say <text>` | Speak arbitrary text |
-| `/loqui-tts:tts-voice [name]` | Change/show voice |
-| `/loqui-tts:tts-status` | Show TTS status |
+| `/claude-talk:tts` | Toggle TTS on/off |
+| `/claude-talk:tts-stop` | Stop current speech |
+| `/claude-talk:tts-say <text>` | Speak arbitrary text |
+| `/claude-talk:tts-voice [name]` | Change/show voice |
+| `/claude-talk:tts-status` | Show TTS status |
 
 ### Available voices
 
@@ -78,7 +78,7 @@ State is persisted to `/tmp/loqui-tts-state.json` (enabled, voice, session ID, s
 
 ### Broker protocol
 
-NDJSON over TCP on port 18081. Same protocol as the Pi extension:
+NDJSON over Loqui's Unix socket (`~/Library/Application Support/Loqui/loqui.sock`). Same protocol as the Pi extension:
 - `{"type": "speak", "text": "...", "sourceApp": "claude-code", "sessionId": "..."}`
 - `{"type": "stop"}`
 - `{"type": "health"}`

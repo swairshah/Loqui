@@ -1,5 +1,5 @@
 {
-  "description": "Loqui TTS: Speaks <voice> tagged content from Claude's responses and receives voice input",
+  "description": "Claude Talk: Speaks <voice> tagged content from Claude's responses and receives voice input",
   "hooks": {
     "SessionStart": [
       {

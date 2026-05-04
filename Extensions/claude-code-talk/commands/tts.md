@@ -1,5 +1,5 @@
 ---
-description: "Toggle Loqui TTS on/off"
+description: "Toggle Claude Talk TTS on/off"
 allowed-tools: ["Bash"]
 ---
 

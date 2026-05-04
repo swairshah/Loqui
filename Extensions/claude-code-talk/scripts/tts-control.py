@@ -9,19 +9,18 @@ Usage:
   tts-control.py say <text>    - Speak arbitrary text
   tts-control.py toggle        - Toggle TTS on/off
   tts-control.py voice <name>  - Change voice
+  tts-control.py style [name]  - Cycle/set verbosity (succinct|verbose|chatty)
 """
 
 import json
 import os
 import socket
 import sys
-import urllib.request
 
-TTS_HOST = "127.0.0.1"
-TTS_PORT = 18080
-BROKER_PORT = 18081
+LOQUI_SOCKET = os.path.expanduser("~/Library/Application Support/Loqui/loqui.sock")
 STATE_FILE = "/tmp/loqui-tts-state.json"
 AVAILABLE_VOICES = ["auto", "alba", "marius", "javert", "fantine", "cosette", "eponine", "azelma"]
+AVAILABLE_STYLES = ["succinct", "verbose", "chatty"]
 
 
 def load_state():
@@ -42,9 +41,9 @@ def save_state(state):
 
 def send_broker_command(command):
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(3)
-        sock.connect((TTS_HOST, BROKER_PORT))
+        sock.connect(LOQUI_SOCKET)
         sock.sendall(json.dumps(command).encode() + b"\n")
         data = b""
         while b"\n" not in data:
@@ -59,21 +58,13 @@ def send_broker_command(command):
 
 
 def check_health():
-    try:
-        req = urllib.request.Request(f"http://{TTS_HOST}:{TTS_PORT}/health", method="GET")
-        with urllib.request.urlopen(req, timeout=2) as resp:
-            if resp.status != 200:
-                return False
-    except Exception:
-        return False
-
     result = send_broker_command({"type": "health"})
     return result.get("ok", False)
 
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: tts-control.py <stop|status|say|toggle|voice> [args]")
+        print("Usage: tts-control.py <stop|status|say|toggle|voice|style> [args]")
         sys.exit(1)
 
     action = sys.argv[1]
@@ -89,11 +80,13 @@ def main():
     elif action == "status":
         healthy = check_health()
         voice = state.get("voice", "auto")
+        style = state.get("style", "verbose")
         enabled = state.get("enabled", True)
         session_id = state.get("session_id", "unknown")
         print(f"Server: {'running ✓' if healthy else 'not running ✗'}")
         print(f"TTS: {'enabled' if enabled else 'disabled'}")
         print(f"Voice: {voice}")
+        print(f"Style: {style}")
         print(f"Session: {session_id}")
 
     elif action == "say":
@@ -135,6 +128,25 @@ def main():
         state["voice"] = voice
         save_state(state)
         print(f"Voice changed to: {voice}")
+
+    elif action == "style":
+        if len(sys.argv) < 3:
+            # No arg: cycle to the next style in the list
+            current = state.get("style", "verbose")
+            try:
+                next_idx = (AVAILABLE_STYLES.index(current) + 1) % len(AVAILABLE_STYLES)
+            except ValueError:
+                next_idx = 0
+            new_style = AVAILABLE_STYLES[next_idx]
+        else:
+            new_style = sys.argv[2].lower()
+            if new_style not in AVAILABLE_STYLES:
+                print(f"Unknown style: {new_style}")
+                print(f"Available: {', '.join(AVAILABLE_STYLES)}")
+                sys.exit(1)
+        state["style"] = new_style
+        save_state(state)
+        print(f"Style changed to: {new_style}. Restart session for new prompt to take effect.")
 
     else:
         print(f"Unknown action: {action}")

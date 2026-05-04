@@ -1,5 +1,5 @@
 ---
-description: "Change Loqui TTS voice (auto, alba, marius, javert, fantine, cosette, eponine, azelma)"
+description: "Change Claude Talk voice (auto, alba, marius, javert, fantine, cosette, eponine, azelma)"
 argument-hint: "[voice-name]"
 allowed-tools: ["Bash"]
 ---

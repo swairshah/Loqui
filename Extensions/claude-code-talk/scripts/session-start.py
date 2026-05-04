@@ -9,16 +9,37 @@ import os
 import socket
 import subprocess
 import sys
-import urllib.request
 
-TTS_HOST = "127.0.0.1"
-TTS_PORT = 18080
-BROKER_PORT = 18081
+LOQUI_SOCKET = os.path.expanduser("~/Library/Application Support/Loqui/loqui.sock")
 STATE_FILE = "/tmp/loqui-tts-state.json"
 INBOX_BASE_DIR = os.path.expanduser("~/.pi/agent/pitalk-inbox")
 WATCHER_PID_FILE = "/tmp/loqui-inbox-watcher.pid"
 
-VOICE_PROMPT = """
+VOICE_PROMPT_SUCCINCT = """
+## Voice Output
+
+You have text-to-speech capabilities. When responding, include brief spoken summaries using <voice> tags.
+
+Guidelines for <voice> content:
+- Keep it brief and conversational (1-2 sentences)
+- Summarize what you're doing or what you found, not full details
+- Use natural speech patterns, contractions, casual tone
+- Use ONLY <voice>...</voice> tags for speech
+- Never use other tags anywhere (no <emphasis>, <strong>, SSML, XML, or HTML)
+- Never nest tags inside <voice>; keep voice text plain
+- For code: describe what it does, don't read the code itself
+- For errors: summarize the issue conversationally
+- For confirmations: keep it simple like "Done!" or "Got it."
+
+Examples:
+- Starting work: <voice>Okay, let me look into that.</voice>
+- Found something: <voice>Found the issue — typo in the config file.</voice>
+- Completed task: <voice>All done.</voice>
+
+The text outside <voice> tags shows normally in the terminal. Only <voice> content is spoken.
+"""
+
+VOICE_PROMPT_VERBOSE = """
 ## Voice Output
 
 You have text-to-speech capabilities. When responding, use <voice> tags to speak conversationally with the user.
@@ -48,22 +69,51 @@ The text outside <voice> tags shows normally in the terminal. Only <voice> conte
 Speak freely and conversationally - the user prefers hearing your responses.
 """
 
+VOICE_PROMPT_CHATTY = """
+## Voice Output
+
+You have text-to-speech capabilities. Use <voice> tags liberally — narrate everything you'd say to a colleague pair-programming with you. The user wants to hear you think out loud.
+
+Guidelines for <voice> content:
+- Narrate intent BEFORE acting: announce what you're about to do and why
+- Comment on findings as you discover them, not just at the end
+- Speak tradeoffs, hunches, and uncertainty out loud
+- React to surprises — "huh, that's not what I expected"
+- Multiple <voice> tags throughout each response (3-6+ is normal)
+- Speak any clarifying questions immediately, don't bury them
+- Use natural speech patterns, contractions, casual tone
+- Use ONLY <voice>...</voice> tags for speech
+- Never use other tags anywhere (no <emphasis>, <strong>, SSML, XML, or HTML tags)
+- Never nest tags inside <voice>; keep voice text plain
+- For code: describe what it does and why it matters, don't read the code itself
+- For file contents: summarize what you saw and what stood out
+- For errors: explain what went wrong conversationally and your hypothesis
+- For decisions: explain the tradeoff out loud
+
+Examples:
+- Announcing intent: <voice>Okay, I'm gonna check the auth config first since that's where the timeout is configured.</voice>
+- Mid-investigation: <voice>Hmm, the timeout's set to thirty seconds here, but the error says it's firing at five. Something else is overriding this.</voice>
+- Reacting to surprise: <voice>Oh interesting — there's a middleware doing its own timeout. That's the culprit.</voice>
+- Explaining tradeoff: <voice>I could either bump the middleware timeout or remove it. Bumping is safer but the middleware's there for a reason — let me check why it exists before removing.</voice>
+- Wrapping up: <voice>Okay, fixed it by raising the middleware timeout to match the auth config. Both are now thirty seconds. Should be good — try it and let me know.</voice>
+
+The text outside <voice> tags shows normally in the terminal. Only <voice> content is spoken.
+Speak freely and abundantly — the user prefers hearing your full thought process.
+"""
+
+VOICE_PROMPTS = {
+    "succinct": VOICE_PROMPT_SUCCINCT,
+    "verbose": VOICE_PROMPT_VERBOSE,
+    "chatty": VOICE_PROMPT_CHATTY,
+}
+
 
 def check_health():
-    """Check if Loqui health endpoint and broker are up."""
+    """Check if Loqui broker is up."""
     try:
-        req = urllib.request.Request(f"http://{TTS_HOST}:{TTS_PORT}/health", method="GET")
-        with urllib.request.urlopen(req, timeout=2) as resp:
-            if resp.status != 200:
-                return False
-    except Exception:
-        return False
-
-    # Check broker
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(2)
-        sock.connect((TTS_HOST, BROKER_PORT))
+        sock.connect(LOQUI_SOCKET)
         sock.sendall(json.dumps({"type": "health"}).encode() + b"\n")
         data = b""
         while b"\n" not in data:
@@ -206,16 +256,20 @@ def main():
     # Start inbox watcher for voice input
     start_inbox_watcher(claude_pid)
 
+    # Pick the voice prompt matching the configured style (default: verbose)
+    style = state.get("style", "verbose")
+    prompt = VOICE_PROMPTS.get(style, VOICE_PROMPT_VERBOSE)
+
     # Inject voice prompt as additional context
     output = {
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": VOICE_PROMPT
+            "additionalContext": prompt
         }
     }
 
     if not healthy:
-        output["systemMessage"] = "⚠️ Loqui TTS broker not running. Start Loqui.app or install: brew install swairshah/tap/loqui"
+        output["systemMessage"] = "PiTalk TTS broker not running. Start PiTalk.app or install: brew install swairshah/tap/pitalk"
 
     print(json.dumps(output))
     sys.exit(0)

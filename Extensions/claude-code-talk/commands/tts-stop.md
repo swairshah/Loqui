@@ -1,5 +1,5 @@
 ---
-description: "Stop current Loqui TTS speech"
+description: "Stop current Claude Talk speech"
 allowed-tools: ["Bash"]
 ---
 

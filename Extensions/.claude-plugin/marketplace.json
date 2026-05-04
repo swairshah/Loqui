@@ -1,14 +1,14 @@
 {
   "name": "loqui-plugins",
   "version": "1.0.0",
-  "description": "Loqui TTS plugins for coding agents",
+  "description": "TTS plugins for coding agents",
   "owner": {
     "name": "Swair Shah"
   },
   "plugins": [
     {
-      "name": "loqui-tts",
-      "description": "Text-to-speech for Claude Code using Loqui. Speaks <voice> tagged content from assistant responses.",
+      "name": "claude-talk",
+      "description": "Text-to-speech for Claude Code. Speaks <voice> tagged content from assistant responses.",
       "source": "./claude-code-talk",
       "category": "productivity"
     }
