@@ -5,6 +5,7 @@ import Carbon.HIToolbox
 import Network
 import Darwin
 import CoreAudio
+import AVFoundation
 import FluidAudio
 import LoquiClient
 
@@ -53,6 +54,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var speechCoordinator: SpeechPlaybackCoordinator?
     var localBroker: LocalSpeechBroker?
     var micMonitor: MicrophoneActivityMonitor?
+    private var ttsEngine: FluidPocketTTSEngine?
     let socketPath = LoquiSocketPaths.socketPath
     private var serverEnabledSwitch: NSSwitch?
     private var speechSpeedSlider: NSSlider?
@@ -133,8 +135,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         setupGlobalShortcut()
         updateDockIconVisibility()
 
+        let engine = FluidPocketTTSEngine(modelDirectory: getModelCachePath(), defaultVoice: selectedVoice)
+        ttsEngine = engine
         speechCoordinator = SpeechPlaybackCoordinator(
-            socketPathProvider: { [weak self] in self?.socketPath ?? LoquiSocketPaths.socketPath },
+            engine: engine,
             defaultVoiceProvider: { [weak self] in self?.selectedVoice ?? "fantine" }
         )
 
@@ -636,10 +640,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard serverEnabled else { return }
         guard localBroker == nil else { return }
         guard let coordinator = speechCoordinator else { return }
+        guard let engine = ttsEngine else { return }
         do {
             let broker = try LocalSpeechBroker(
                 socketPath: socketPath,
-                modelDirectory: getModelCachePath(),
+                engine: engine,
                 coordinator: coordinator,
                 defaultVoiceProvider: { [weak self] in self?.selectedVoice ?? "fantine" }
             )
@@ -851,7 +856,7 @@ private enum UnixSocketListener {
     }
 }
 
-private actor FluidPocketTTSEngine {
+actor FluidPocketTTSEngine {
     private let manager: PocketTtsManager
     private var initialized = false
 
@@ -874,6 +879,151 @@ private actor FluidPocketTTSEngine {
             text: text,
             voice: trimmedVoice?.isEmpty == false ? trimmedVoice : nil
         )
+    }
+
+    func synthesizePCMStream(text: String, voice: String?) async throws -> AsyncThrowingStream<[Float], Error> {
+        if !initialized {
+            try await manager.initialize()
+            initialized = true
+        }
+
+        let trimmedVoice = voice?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let frameStream = try await manager.synthesizeStreaming(
+            text: text,
+            voice: trimmedVoice?.isEmpty == false ? trimmedVoice : nil
+        )
+
+        return AsyncThrowingStream { continuation in
+            Task {
+                do {
+                    for try await frame in frameStream {
+                        continuation.yield(frame.samples)
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+        }
+    }
+}
+
+final class NativeStreamingAudioPlayback: @unchecked Sendable {
+    private let engine = AVAudioEngine()
+    private let player = AVAudioPlayerNode()
+    private let timePitch = AVAudioUnitTimePitch()
+    private let format: AVAudioFormat
+    private let stateQueue = DispatchQueue(label: "loqui.native.audio.playback")
+
+    private var pendingBuffers = 0
+    private var finishedScheduling = false
+    private var stopped = false
+    private var finishContinuation: CheckedContinuation<Void, Never>?
+
+    init(sampleRate: Double = 24_000, playbackRate: Double = 1.0) throws {
+        guard let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: sampleRate,
+            channels: 1,
+            interleaved: false
+        ) else {
+            throw NSError(domain: "Loqui", code: 4, userInfo: [NSLocalizedDescriptionKey: "Failed to create audio format"])
+        }
+
+        self.format = format
+        timePitch.rate = Float(min(2.0, max(0.7, playbackRate)))
+    }
+
+    var isRunning: Bool {
+        stateQueue.sync { !stopped }
+    }
+
+    func start() throws {
+        engine.attach(player)
+        engine.attach(timePitch)
+        engine.connect(player, to: timePitch, format: format)
+        engine.connect(timePitch, to: engine.mainMixerNode, format: format)
+        engine.prepare()
+        try engine.start()
+        player.play()
+    }
+
+    func schedule(samples: [Float]) throws {
+        guard !samples.isEmpty else { return }
+        guard let buffer = AVAudioPCMBuffer(
+            pcmFormat: format,
+            frameCapacity: AVAudioFrameCount(samples.count)
+        ) else {
+            throw NSError(domain: "Loqui", code: 5, userInfo: [NSLocalizedDescriptionKey: "Failed to create audio buffer"])
+        }
+
+        buffer.frameLength = AVAudioFrameCount(samples.count)
+        guard let channel = buffer.floatChannelData?[0] else {
+            throw NSError(domain: "Loqui", code: 6, userInfo: [NSLocalizedDescriptionKey: "Failed to access audio buffer"])
+        }
+        samples.withUnsafeBufferPointer { source in
+            if let baseAddress = source.baseAddress {
+                channel.update(from: baseAddress, count: samples.count)
+            }
+        }
+
+        let shouldSchedule = stateQueue.sync { () -> Bool in
+            guard !stopped else { return false }
+            pendingBuffers += 1
+            return true
+        }
+        guard shouldSchedule else { return }
+
+        player.scheduleBuffer(buffer) { [weak self] in
+            self?.bufferDidFinish()
+        }
+
+        if !player.isPlaying {
+            player.play()
+        }
+    }
+
+    func finish() async {
+        await withCheckedContinuation { continuation in
+            stateQueue.async {
+                self.finishedScheduling = true
+                self.finishContinuation = continuation
+                self.completeIfDoneLocked()
+            }
+        }
+    }
+
+    func stop() {
+        stateQueue.sync {
+            guard !stopped else { return }
+            stopped = true
+            finishContinuation?.resume()
+            finishContinuation = nil
+        }
+
+        player.stop()
+        engine.stop()
+    }
+
+    private func bufferDidFinish() {
+        stateQueue.async {
+            if self.pendingBuffers > 0 {
+                self.pendingBuffers -= 1
+            }
+            self.completeIfDoneLocked()
+        }
+    }
+
+    private func completeIfDoneLocked() {
+        guard finishedScheduling, pendingBuffers == 0 else { return }
+        stopped = true
+        finishContinuation?.resume()
+        finishContinuation = nil
+
+        DispatchQueue.global().async { [player, engine] in
+            player.stop()
+            engine.stop()
+        }
     }
 }
 
@@ -1186,7 +1336,7 @@ final class SpeechPlaybackCoordinator {
     private var queueOrder: [String] = []
 
     private var isPlaying = false
-    private var currentProcess: Process?
+    private var currentPlayback: NativeStreamingAudioPlayback?
     private var currentJobHistoryId: UUID?
     private var currentQueueKey: String?
     private var currentRunNonce: UUID?
@@ -1199,12 +1349,12 @@ final class SpeechPlaybackCoordinator {
     private var autoVoiceByQueueKey: [String: String] = [:]
     private var autoVoiceCycleIndex = 0
 
-    private let socketPathProvider: () -> String
+    private let engine: FluidPocketTTSEngine
     private let defaultVoiceProvider: () -> String
 
-    init(socketPathProvider: @escaping () -> String,
+    init(engine: FluidPocketTTSEngine,
          defaultVoiceProvider: @escaping () -> String) {
-        self.socketPathProvider = socketPathProvider
+        self.engine = engine
         self.defaultVoiceProvider = defaultVoiceProvider
     }
 
@@ -1300,7 +1450,7 @@ final class SpeechPlaybackCoordinator {
         isMicrophoneActive = active
 
         if active {
-            let activelyPlaying = currentProcess?.isRunning == true
+            let activelyPlaying = currentPlayback?.isRunning == true
 
             // Requirement: if mic starts while voice is already playing, cancel all queued work at that moment.
             guard activelyPlaying else { return }
@@ -1355,8 +1505,6 @@ final class SpeechPlaybackCoordinator {
         var finalStatus: RequestPlaybackStatus = .played
 
         do {
-            let audioData = try await synthesize(job: job)
-
             guard await waitUntilMicrophoneInactive(runNonce: runNonce) else {
                 return
             }
@@ -1364,7 +1512,7 @@ final class SpeechPlaybackCoordinator {
                 return
             }
 
-            try await play(audioData: audioData)
+            try await playStreaming(job: job, runNonce: runNonce)
         } catch {
             finalStatus = .failed
             print("Loqui: Playback error: \(error.localizedDescription)")
@@ -1383,7 +1531,7 @@ final class SpeechPlaybackCoordinator {
         queue.async {
             guard self.currentRunNonce == runNonce else { return }
 
-            self.currentProcess = nil
+            self.currentPlayback = nil
             self.currentJobHistoryId = nil
             self.currentQueueKey = nil
             self.currentRunNonce = nil
@@ -1415,64 +1563,30 @@ final class SpeechPlaybackCoordinator {
         }
     }
 
-    private func synthesize(job: SpeechJob) async throws -> Data {
-        try await TTSClient(socketPath: socketPathProvider()).synthesize(text: job.text, voice: job.voice)
-    }
+    private func playStreaming(job: SpeechJob, runNonce: UUID) async throws {
+        let stream = try await engine.synthesizePCMStream(text: job.text, voice: job.voice)
+        let playback = try NativeStreamingAudioPlayback(playbackRate: configuredSpeechSpeed())
+        try playback.start()
 
-    private func play(audioData: Data) async throws {
-        guard let ffplayPath = findFFPlayPath() else {
-            throw NSError(domain: "Loqui", code: 404, userInfo: [NSLocalizedDescriptionKey: "ffplay not found"])
+        let accepted = queue.sync { () -> Bool in
+            guard self.currentRunNonce == runNonce else { return false }
+            self.currentPlayback = playback
+            return true
+        }
+        guard accepted else {
+            playback.stop()
+            return
         }
 
-        let tempURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("loqui-\(UUID().uuidString).raw")
-        try audioData.write(to: tempURL)
-
-        defer {
-            try? FileManager.default.removeItem(at: tempURL)
-        }
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: ffplayPath)
-        var arguments = [
-            "-f", "s16le",
-            "-ar", "24000",
-            "-ch_layout", "mono",
-            "-nodisp",
-            "-autoexit",
-            "-loglevel", "quiet"
-        ]
-        if let tempoFilter = localPlaybackTempoFilter() {
-            arguments.append(contentsOf: ["-af", tempoFilter])
-        }
-        arguments.append(tempURL.path)
-        process.arguments = arguments
-
-        try process.run()
-
-        queue.sync {
-            self.currentProcess = process
-        }
-
-        await withCheckedContinuation { continuation in
-            process.terminationHandler = { _ in
-                continuation.resume()
+        for try await samples in stream {
+            guard shouldContinue(runNonce: runNonce) else {
+                playback.stop()
+                return
             }
-        }
-    }
-
-    private func findFFPlayPath() -> String? {
-        let paths = [
-            "/opt/homebrew/bin/ffplay",
-            "/usr/local/bin/ffplay",
-            "/usr/bin/ffplay"
-        ]
-
-        for path in paths where FileManager.default.fileExists(atPath: path) {
-            return path
+            try playback.schedule(samples: samples)
         }
 
-        return nil
+        await playback.finish()
     }
 
     private func configuredSpeechSpeed() -> Double {
@@ -1488,22 +1602,11 @@ final class SpeechPlaybackCoordinator {
     }
 
     private func terminateCurrentProcessLocked() {
-        guard let process = currentProcess else { return }
-
-        if process.isRunning {
-            process.terminate()
-            DispatchQueue.global().asyncAfter(deadline: .now() + 0.25) {
-                if process.isRunning {
-                    kill(process.processIdentifier, SIGKILL)
-                }
-            }
-        }
-
-        currentProcess = nil
+        currentPlayback?.stop()
+        currentPlayback = nil
     }
 
     private func sendStopToServer() async {
-        try? await TTSClient(socketPath: socketPathProvider()).stop()
     }
 
     private func resolveVoiceForQueueLocked(requestedVoice: String?, queueKey: String) -> String {
@@ -1600,7 +1703,7 @@ final class LocalSpeechBroker {
 
     init(
         socketPath: String,
-        modelDirectory: URL,
+        engine: FluidPocketTTSEngine,
         coordinator: SpeechPlaybackCoordinator,
         defaultVoiceProvider: @escaping () -> String
     ) throws {
@@ -1608,7 +1711,7 @@ final class LocalSpeechBroker {
         self.listener = try UnixSocketListener.make(path: socketPath)
         self.coordinator = coordinator
         self.defaultVoiceProvider = defaultVoiceProvider
-        self.engine = FluidPocketTTSEngine(modelDirectory: modelDirectory, defaultVoice: defaultVoiceProvider())
+        self.engine = engine
     }
 
     func start() {
@@ -2010,12 +2113,6 @@ struct GeneralSettingsView: View {
         min(2.0, max(0.7, speechSpeed))
     }
 
-    private var previewTempoFilter: String? {
-        let speed = (clampedSpeechSpeed * 100).rounded() / 100
-        guard abs(speed - 1.0) > 0.01 else { return nil }
-        return String(format: "atempo=%.2f", speed)
-    }
-    
     func updateDockIcon() {
         if let appDelegate = NSApp.delegate as? AppDelegate {
             appDelegate.updateDockIconVisibility()
@@ -2037,43 +2134,17 @@ struct GeneralSettingsView: View {
         isPreviewPlaying = true
         
         let text = "Hi, this is \(voiceName.capitalized)."
-        let tempoFilter = previewTempoFilter
+        let playbackRate = clampedSpeechSpeed
         
         Task {
             do {
                 let data = try await TTSClient().synthesize(text: text, voice: voiceName)
-                
-                // Write PCM data to temp file and play with afplay
-                let tempFile = FileManager.default.temporaryDirectory.appendingPathComponent("voice_preview.raw")
-                try data.write(to: tempFile)
-                
-                // Convert and play using ffplay
-                let ffplayPath = "/opt/homebrew/bin/ffplay"
-                if FileManager.default.fileExists(atPath: ffplayPath) {
-                    let process = Process()
-                    process.executableURL = URL(fileURLWithPath: ffplayPath)
-                    var arguments = [
-                        "-f", "s16le",
-                        "-ar", "24000",
-                        "-ch_layout", "mono",
-                        "-nodisp",
-                        "-autoexit",
-                        "-loglevel", "quiet"
-                    ]
-                    if let tempoFilter {
-                        arguments.append(contentsOf: ["-af", tempoFilter])
-                    }
-                    arguments.append(tempFile.path)
-                    process.arguments = arguments
-                    process.terminationHandler = { _ in
-                        DispatchQueue.main.async {
-                            self.isPreviewPlaying = false
-                        }
-                        try? FileManager.default.removeItem(at: tempFile)
-                    }
-                    try process.run()
-                } else {
-                    isPreviewPlaying = false
+                let playback = try NativeStreamingAudioPlayback(playbackRate: playbackRate)
+                try playback.start()
+                try playback.schedule(samples: Self.floatSamples(fromPCM16LE: data))
+                await playback.finish()
+                await MainActor.run {
+                    self.isPreviewPlaying = false
                 }
             } catch {
                 print("Voice preview error: \(error)")
@@ -2096,6 +2167,22 @@ struct GeneralSettingsView: View {
                 print("Failed to set launch at login: \(error)")
             }
         }
+    }
+
+    private static func floatSamples(fromPCM16LE data: Data) -> [Float] {
+        var samples: [Float] = []
+        samples.reserveCapacity(data.count / 2)
+
+        var offset = 0
+        while offset + 1 < data.count {
+            let low = UInt16(data[offset])
+            let high = UInt16(data[offset + 1]) << 8
+            let sample = Int16(bitPattern: low | high)
+            samples.append(max(-1.0, Float(sample) / Float(Int16.max)))
+            offset += 2
+        }
+
+        return samples
     }
 }
 

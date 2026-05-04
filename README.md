@@ -127,7 +127,7 @@ The app ends up in `.build/Loqui.app`. The build script compiles the Swift menub
 
 Loqui runs as a menubar app. It starts a local Unix socket listener at `~/Library/Application Support/Loqui/loqui.sock`.
 
-- `speak` is the IPC path for centralized queueing, scheduling, and playback.
+- `speak` is the IPC path for centralized queueing, scheduling, and native streaming playback.
 - `raw` and `generate` are for direct audio synthesis workflows.
 
 ## Troubleshooting
@@ -137,8 +137,8 @@ Loqui runs as a menubar app. It starts a local Unix socket listener at `~/Librar
 2. Test: `loqui status`
 
 **No audio?**
-1. Check ffplay: `which ffplay`
-2. Install if missing: `brew install ffmpeg`
+1. Check the macOS output device and volume.
+2. Try the built-in preview button in Loqui settings.
 
 ## License
 
