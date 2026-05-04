@@ -4,7 +4,7 @@
  * Adds text-to-speech capabilities to Pi using <voice> tags.
  * Speaks only <voice> tagged content from assistant responses.
  *
- * Requires Loqui.app (TTS server at localhost:18080).
+ * Requires Loqui.app (local API over Unix domain sockets).
  * Install with: brew install swairshah/tap/loqui
  *
  * Commands:
@@ -30,9 +30,8 @@ import os from "node:os";
 const INBOX_BASE_DIR = path.join(os.homedir(), ".pi", "agent", "pitalk-inbox");
 
 // Configuration - matches Loqui defaults
-const TTS_PORT = 18080;
-const TTS_HOST = "127.0.0.1";
-const BROKER_PORT = 18081;
+const LOQUI_APP_SUPPORT = path.join(os.homedir(), "Library", "Application Support", "Loqui");
+const LOQUI_SOCKET = path.join(LOQUI_APP_SUPPORT, "loqui.sock");
 const AVAILABLE_VOICES = ["auto", "alba", "marius", "javert", "fantine", "cosette", "eponine", "azelma"];
 
 // System prompt injection for voice tags - succinct style
@@ -228,7 +227,7 @@ export default function (pi: ExtensionAPI) {
       };
 
       // Attach error handler immediately after creating socket to avoid unhandled connection errors.
-      const socket = net.createConnection({ host: TTS_HOST, port: BROKER_PORT });
+      const socket = net.createConnection(LOQUI_SOCKET);
       socket.on("error", () => {
         finish(() => reject(new Error("Connection failed")));
       });
@@ -284,21 +283,9 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  // Check if Loqui server + broker are running
+  // Check if Loqui broker is running
   async function checkServer(): Promise<boolean> {
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 1500);
-
-      const res = await fetch(`http://${TTS_HOST}:${TTS_PORT}/health`, {
-        signal: controller.signal,
-      }).finally(() => clearTimeout(timeoutId));
-
-      if (!res.ok) {
-        serverReady = false;
-        return false;
-      }
-
       const broker = await sendBrokerCommand({ type: "health" }, 1500);
       serverReady = broker.ok === true;
       return serverReady;

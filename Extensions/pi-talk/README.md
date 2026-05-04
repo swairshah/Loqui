@@ -51,7 +51,7 @@ Press **Cmd+.** to stop speech at any time (requires Loqui.app running).
 
 1. The extension injects a system prompt that teaches Pi to use `<voice>` tags
 2. When Pi responds, the extension extracts `<voice>` content
-3. The extension sends speech jobs to Loqui's local broker (`127.0.0.1:18081`), including `sourceApp`, `sessionId`, and `pid`
+3. The extension sends speech jobs to Loqui's local socket (`~/Library/Application Support/Loqui/loqui.sock`), including `sourceApp`, `sessionId`, and `pid`
 4. Loqui schedules per-session queues and plays audio centrally (no cloud, no API keys)
 
 ## Credits
