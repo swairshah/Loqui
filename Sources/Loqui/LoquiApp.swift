@@ -30,6 +30,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         static let queue = 201
         static let history = 202
         static let activeApps = 203
+        static let stopAudio = 204
+        static let readClipboard = 205
     }
 
     private struct ActiveSessionSummary {
@@ -49,8 +51,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var statusItem: NSStatusItem!
     var isServerRunning = false
     var settingsWindow: NSWindow?
-    var hotKeyRef: EventHotKeyRef?
-    var eventHandler: EventHandlerRef?
     var speechCoordinator: SpeechPlaybackCoordinator?
     var localBroker: LocalSpeechBroker?
     var micMonitor: MicrophoneActivityMonitor?
@@ -132,7 +132,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMenuBar()
-        setupGlobalShortcut()
+        setupKeyboardShortcuts()
         updateDockIconVisibility()
 
         let engine = FluidPocketTTSEngine(modelDirectory: getModelCachePath(), defaultVoice: selectedVoice)
@@ -177,12 +177,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         micMonitor?.stop()
         stopLocalBroker()
         speechCoordinator?.stopAll()
-        if let hotKeyRef = hotKeyRef {
-            UnregisterEventHotKey(hotKeyRef)
-        }
-        if let eventHandler = eventHandler {
-            RemoveEventHandler(eventHandler)
-        }
+        KeyboardShortcutManager.shared.unregisterAll()
     }
     
     // MARK: - Menu Bar
@@ -219,10 +214,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
-        let stopSpeechItem = NSMenuItem(title: "Stop Speech", action: #selector(stopCurrentSpeech), keyEquivalent: ".")
-        stopSpeechItem.keyEquivalentModifierMask = [.command]
+        let stopSpeechItem = NSMenuItem(title: shortcutMenuTitle(for: .stopAudio), action: #selector(stopCurrentSpeech), keyEquivalent: "")
+        stopSpeechItem.tag = MenuItemTag.stopAudio
         stopSpeechItem.target = self
         menu.addItem(stopSpeechItem)
+
+        let readClipboardItem = NSMenuItem(title: shortcutMenuTitle(for: .readClipboard), action: #selector(speakClipboardText), keyEquivalent: "")
+        readClipboardItem.tag = MenuItemTag.readClipboard
+        readClipboardItem.target = self
+        menu.addItem(readClipboardItem)
 
         menu.addItem(NSMenuItem.separator())
 
@@ -613,27 +613,33 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return nil
     }
 
-    // MARK: - Global Shortcut (Cmd+.)
-    
-    func setupGlobalShortcut() {
-        // Use Carbon API for true global hotkey that works everywhere
-        var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-        
-        let handler: EventHandlerUPP = { _, event, userData -> OSStatus in
-            guard let userData = userData else { return OSStatus(eventNotHandledErr) }
-            let appDelegate = Unmanaged<AppDelegate>.fromOpaque(userData).takeUnretainedValue()
-            appDelegate.stopCurrentSpeech()
-            return noErr
+    // MARK: - Global Keyboard Shortcuts
+
+    func setupKeyboardShortcuts() {
+        let manager = KeyboardShortcutManager.shared
+        manager.setHandler(for: .stopAudio) { [weak self] in
+            self?.stopCurrentSpeech()
         }
-        
-        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
-        InstallEventHandler(GetApplicationEventTarget(), handler, 1, &eventType, selfPtr, &eventHandler)
-        
-        // Register Cmd+. hotkey
-        // Key code 47 = period (.)
-        let hotKeyID = EventHotKeyID(signature: OSType(0x4C4F5149), id: 1) // "LOQI"
-        let modifiers: UInt32 = UInt32(cmdKey)
-        RegisterEventHotKey(47, modifiers, hotKeyID, GetApplicationEventTarget(), 0, &hotKeyRef)
+        manager.setHandler(for: .readClipboard) { [weak self] in
+            self?.speakClipboardText()
+        }
+        manager.registerAll()
+    }
+
+    func refreshShortcutMenuItems() {
+        if let item = statusItem?.menu?.item(withTag: MenuItemTag.stopAudio) {
+            item.title = shortcutMenuTitle(for: .stopAudio)
+        }
+        if let item = statusItem?.menu?.item(withTag: MenuItemTag.readClipboard) {
+            item.title = shortcutMenuTitle(for: .readClipboard)
+        }
+    }
+
+    private func shortcutMenuTitle(for action: ShortcutAction) -> String {
+        guard let shortcut = KeyboardShortcutManager.shared.bindings[action]?.displayString else {
+            return action.displayName
+        }
+        return "\(action.displayName) (\(shortcut))"
     }
 
     func startLocalBroker() {
@@ -660,6 +666,30 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func stopCurrentSpeech() {
         // Centralized stop: clear broker queue, stop active Loqui playback, stop current synth request.
         speechCoordinator?.stopAll()
+    }
+
+    @objc private func speakClipboardText() {
+        guard let coordinator = speechCoordinator else {
+            NSSound.beep()
+            return
+        }
+
+        let text = NSPasteboard.general.string(forType: .string)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        guard !text.isEmpty else {
+            NSSound.beep()
+            return
+        }
+
+        coordinator.stopAll()
+        _ = coordinator.enqueue(
+            text: text,
+            voice: selectedVoice,
+            sourceApp: "Loqui Clipboard",
+            sessionId: "global-shortcut",
+            pid: Int(ProcessInfo.processInfo.processIdentifier)
+        )
     }
     
     // MARK: - Server Management
@@ -2097,14 +2127,7 @@ struct GeneralSettingsView: View {
                     }
             }
 
-            Section("Shortcut") {
-                HStack {
-                    Text("Stop Speech")
-                        .foregroundColor(.secondary)
-                    Spacer()
-                    KeyboardShortcutView(keys: ["⌘", "."])
-                }
-            }
+            StopAudioShortcutSettingsSection()
         }
         .formStyle(.grouped)
     }
@@ -2489,7 +2512,8 @@ struct HistoryView: View {
                         .foregroundColor(.secondary)
                 }
                 if entry.status == .interrupted {
-                    Label("Stopped via ⌘.", systemImage: "stop.fill")
+                    let shortcutText = KeyboardShortcutManager.shared.bindings[.stopAudio]?.displayString ?? "shortcut"
+                    Label("Stopped via \(shortcutText)", systemImage: "stop.fill")
                         .font(.caption2)
                         .foregroundColor(.orange)
                 }
