@@ -5,6 +5,8 @@ import Carbon.HIToolbox
 import Network
 import Darwin
 import CoreAudio
+import FluidAudio
+import LoquiClient
 
 @main
 struct LoquiApp: App {
@@ -26,6 +28,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         static let activeSessions = 200
         static let queue = 201
         static let history = 202
+        static let activeApps = 203
     }
 
     private struct ActiveSessionSummary {
@@ -35,8 +38,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let queuedCount: Int
     }
 
+    private struct ActiveAppSummary {
+        let sourceApp: String
+        let lastMessageAt: Date
+        let totalCount: Int
+        let queuedCount: Int
+    }
+
     var statusItem: NSStatusItem!
-    var serverProcess: Process?
     var isServerRunning = false
     var settingsWindow: NSWindow?
     var hotKeyRef: EventHotKeyRef?
@@ -44,9 +53,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var speechCoordinator: SpeechPlaybackCoordinator?
     var localBroker: LocalSpeechBroker?
     var micMonitor: MicrophoneActivityMonitor?
-    let brokerPort = 18081
+    let socketPath = LoquiSocketPaths.socketPath
     private var serverEnabledSwitch: NSSwitch?
-    private var isStoppingServer = false
+    private var speechSpeedSlider: NSSlider?
+    private var speechSpeedLabel: NSTextField?
 
     private let activeSessionWindow: TimeInterval = 5 * 60
     private let maxMenuRowsPerSection = 8
@@ -55,9 +65,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         formatter.unitsStyle = .short
         return formatter
     }()
-    
-    // Configuration
-    let serverHost = "127.0.0.1"
     
     // Dock icon visibility (defaults to true)
     var showDockIcon: Bool {
@@ -86,12 +93,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    // Read from UserDefaults (synced with @AppStorage in SettingsView)
-    var serverPort: Int {
-        let port = UserDefaults.standard.integer(forKey: "ttsPort")
-        return port > 0 ? port : 18080
-    }
-    
     var selectedVoice: String {
         UserDefaults.standard.string(forKey: "ttsVoice") ?? "fantine"
     }
@@ -105,17 +106,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         if enabled {
             startLocalBroker()
-            startServer()
         } else {
             speechCoordinator?.stopAll()
             stopLocalBroker()
-            stopServer()
             updateStatusIcon(running: false)
         }
     }
 
     func syncServerEnabledSwitchState() {
         serverEnabledSwitch?.state = serverEnabled ? .on : .off
+    }
+
+    func syncSpeechSpeedControlState() {
+        let speed = currentSpeechSpeed()
+        speechSpeedSlider?.doubleValue = speed
+        speechSpeedLabel?.stringValue = String(format: "%.1fx", speed)
     }
 
     private func stopLocalBroker() {
@@ -129,8 +134,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateDockIconVisibility()
 
         speechCoordinator = SpeechPlaybackCoordinator(
-            hostProvider: { [weak self] in self?.serverHost ?? "127.0.0.1" },
-            portProvider: { [weak self] in self?.serverPort ?? 18080 },
+            socketPathProvider: { [weak self] in self?.socketPath ?? LoquiSocketPaths.socketPath },
             defaultVoiceProvider: { [weak self] in self?.selectedVoice ?? "fantine" }
         )
 
@@ -142,7 +146,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         syncServerEnabledSwitchState()
         if serverEnabled {
             startLocalBroker()
-            startServer()
         } else {
             updateStatusIcon(running: false)
         }
@@ -170,7 +173,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         micMonitor?.stop()
         stopLocalBroker()
         speechCoordinator?.stopAll()
-        stopServer()
         if let hotKeyRef = hotKeyRef {
             UnregisterEventHotKey(hotKeyRef)
         }
@@ -192,12 +194,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusMenuItem.tag = MenuItemTag.status
         menu.addItem(statusMenuItem)
 
-        menu.addItem(makeServerToggleMenuItem())
+        menu.addItem(makePlaybackControlsMenuItem())
         menu.addItem(NSMenuItem.separator())
 
         let activeSessionsItem = NSMenuItem(title: "Active Sessions (0)", action: nil, keyEquivalent: "")
         activeSessionsItem.tag = MenuItemTag.activeSessions
         menu.addItem(activeSessionsItem)
+
+        let activeAppsItem = NSMenuItem(title: "Active Apps (0)", action: nil, keyEquivalent: "")
+        activeAppsItem.tag = MenuItemTag.activeApps
+        menu.addItem(activeAppsItem)
 
         let queueItem = NSMenuItem(title: "Queue (0)", action: nil, keyEquivalent: "")
         queueItem.tag = MenuItemTag.queue
@@ -244,26 +250,66 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshSessionSectionsMenu()
     }
 
-    private func makeServerToggleMenuItem() -> NSMenuItem {
+    private func makePlaybackControlsMenuItem() -> NSMenuItem {
         let item = NSMenuItem()
         item.tag = MenuItemTag.serverEnabled
 
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 220, height: 28))
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 38))
 
-        let label = NSTextField(labelWithString: "Server Enabled")
-        label.font = .systemFont(ofSize: 13)
-        label.frame = NSRect(x: 10, y: 6, width: 130, height: 16)
-        container.addSubview(label)
+        let speedIcon = NSImageView(frame: NSRect(x: 12, y: 10, width: 20, height: 18))
+        speedIcon.image = NSImage(systemSymbolName: "tortoise", accessibilityDescription: "Speech speed")
+        speedIcon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
+        speedIcon.contentTintColor = .secondaryLabelColor
+        container.addSubview(speedIcon)
 
-        let toggle = NSSwitch(frame: NSRect(x: 165, y: 3, width: 51, height: 24))
+        let slider = NSSlider(value: currentSpeechSpeed(), minValue: 0.7, maxValue: 2.0, target: self, action: #selector(speechSpeedSliderChanged(_:)))
+        slider.frame = NSRect(x: 42, y: 8, width: 100, height: 22)
+        slider.numberOfTickMarks = 0
+        slider.allowsTickMarkValuesOnly = false
+        slider.isContinuous = true
+        slider.controlSize = .small
+        container.addSubview(slider)
+
+        let speedLabel = NSTextField(labelWithString: String(format: "%.1fx", currentSpeechSpeed()))
+        speedLabel.font = .monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
+        speedLabel.textColor = .secondaryLabelColor
+        speedLabel.alignment = .right
+        speedLabel.frame = NSRect(x: 148, y: 11, width: 44, height: 16)
+        container.addSubview(speedLabel)
+
+        let divider = NSBox(frame: NSRect(x: 207, y: 8, width: 1, height: 22))
+        divider.boxType = .separator
+        container.addSubview(divider)
+
+        let speakerIcon = NSImageView(frame: NSRect(x: 222, y: 10, width: 20, height: 18))
+        speakerIcon.image = NSImage(systemSymbolName: "speaker.wave.2", accessibilityDescription: "Server enabled")
+        speakerIcon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
+        speakerIcon.contentTintColor = .secondaryLabelColor
+        container.addSubview(speakerIcon)
+
+        let toggle = NSSwitch(frame: NSRect(x: 247, y: 7, width: 48, height: 24))
         toggle.target = self
         toggle.action = #selector(serverEnabledSwitchChanged(_:))
         toggle.state = serverEnabled ? .on : .off
         container.addSubview(toggle)
 
+        speechSpeedSlider = slider
+        speechSpeedLabel = speedLabel
         serverEnabledSwitch = toggle
         item.view = container
         return item
+    }
+
+    private func currentSpeechSpeed() -> Double {
+        let raw = UserDefaults.standard.object(forKey: "speechSpeed") as? Double ?? 1.0
+        let rounded = (raw * 20).rounded() / 20
+        return min(2.0, max(0.7, rounded))
+    }
+
+    @objc private func speechSpeedSliderChanged(_ sender: NSSlider) {
+        let speed = min(2.0, max(0.7, (sender.doubleValue * 20).rounded() / 20))
+        UserDefaults.standard.set(speed, forKey: "speechSpeed")
+        speechSpeedLabel?.stringValue = String(format: "%.1fx", speed)
     }
 
     @objc private func serverEnabledSwitchChanged(_ sender: NSSwitch) {
@@ -272,6 +318,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) {
         syncServerEnabledSwitchState()
+        syncSpeechSpeedControlState()
         refreshSessionSectionsMenu()
     }
 
@@ -280,6 +327,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let entries = RequestHistoryStore.shared.entries
         let activeSessions = buildActiveSessions(from: entries)
+        let activeApps = buildActiveApps(from: entries)
         let queueEntries = entries
             .filter { $0.status.isInQueue }
             .sorted { $0.timestamp < $1.timestamp }
@@ -290,6 +338,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let activeItem = menu.item(withTag: MenuItemTag.activeSessions) {
             activeItem.title = "Active Sessions (\(activeSessions.count))"
             activeItem.submenu = makeActiveSessionsSubmenu(activeSessions)
+        }
+
+        if let activeAppsItem = menu.item(withTag: MenuItemTag.activeApps) {
+            activeAppsItem.title = "Active Apps (\(activeApps.count))"
+            activeAppsItem.submenu = makeActiveAppsSubmenu(activeApps)
         }
 
         if let queueItem = menu.item(withTag: MenuItemTag.queue) {
@@ -335,6 +388,34 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             .sorted { $0.lastMessageAt > $1.lastMessageAt }
     }
 
+    private func buildActiveApps(from entries: [RequestHistoryEntry]) -> [ActiveAppSummary] {
+        let cutoff = Date().addingTimeInterval(-activeSessionWindow)
+        var buckets: [String: ActiveAppSummary] = [:]
+
+        for entry in entries where entry.timestamp >= cutoff {
+            let sourceApp = normalizedAppName(entry.sourceApp)
+            let queuedIncrement = entry.status.isInQueue ? 1 : 0
+
+            if let existing = buckets[sourceApp] {
+                buckets[sourceApp] = ActiveAppSummary(
+                    sourceApp: existing.sourceApp,
+                    lastMessageAt: max(existing.lastMessageAt, entry.timestamp),
+                    totalCount: existing.totalCount + 1,
+                    queuedCount: existing.queuedCount + queuedIncrement
+                )
+            } else {
+                buckets[sourceApp] = ActiveAppSummary(
+                    sourceApp: sourceApp,
+                    lastMessageAt: entry.timestamp,
+                    totalCount: 1,
+                    queuedCount: queuedIncrement
+                )
+            }
+        }
+
+        return buckets.values.sorted { $0.lastMessageAt > $1.lastMessageAt }
+    }
+
     private func makeActiveSessionsSubmenu(_ sessions: [ActiveSessionSummary]) -> NSMenu {
         let submenu = NSMenu()
 
@@ -356,6 +437,35 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if sessions.count > maxMenuRowsPerSection {
             submenu.addItem(makeDisabledMenuItem("… \(sessions.count - maxMenuRowsPerSection) more"))
         }
+
+        return submenu
+    }
+
+    private func makeActiveAppsSubmenu(_ apps: [ActiveAppSummary]) -> NSMenu {
+        let submenu = NSMenu()
+
+        guard !apps.isEmpty else {
+            submenu.addItem(makeDisabledMenuItem("No active apps in the last 5m"))
+            return submenu
+        }
+
+        for app in apps.prefix(maxMenuRowsPerSection) {
+            let relative = relativeDateFormatter.localizedString(for: app.lastMessageAt, relativeTo: Date())
+            var title = "\(app.sourceApp) • \(app.totalCount) request\(app.totalCount == 1 ? "" : "s") • \(relative)"
+            if app.queuedCount > 0 {
+                title += " • \(app.queuedCount) queued"
+            }
+            submenu.addItem(makeDisabledMenuItem(title))
+        }
+
+        if apps.count > maxMenuRowsPerSection {
+            submenu.addItem(makeDisabledMenuItem("… \(apps.count - maxMenuRowsPerSection) more"))
+        }
+
+        submenu.addItem(NSMenuItem.separator())
+        let openHistoryItem = NSMenuItem(title: "Open History…", action: #selector(openSettings), keyEquivalent: "")
+        openHistoryItem.target = self
+        submenu.addItem(openHistoryItem)
 
         return submenu
     }
@@ -466,7 +576,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if !serverEnabled {
                 statusItem.title = "Server: Disabled"
             } else {
-                statusItem.title = running ? "Server: Running on port \(serverPort)" : "Server: Stopped"
+                statusItem.title = running ? "Server: Running on Unix sockets" : "Server: Stopped"
             }
         }
         
@@ -527,12 +637,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard localBroker == nil else { return }
         guard let coordinator = speechCoordinator else { return }
         do {
-            let broker = try LocalSpeechBroker(port: brokerPort, coordinator: coordinator)
+            let broker = try LocalSpeechBroker(
+                socketPath: socketPath,
+                modelDirectory: getModelCachePath(),
+                coordinator: coordinator,
+                defaultVoiceProvider: { [weak self] in self?.selectedVoice ?? "fantine" }
+            )
             broker.start()
             localBroker = broker
-            print("Loqui: Local broker listening on 127.0.0.1:\(brokerPort)")
+            print("Loqui: Local API listening on \(socketPath)")
+            checkServerHealth()
         } catch {
-            print("Loqui: Failed to start local broker: \(error)")
+            print("Loqui: Failed to start local API: \(error)")
         }
     }
     
@@ -543,112 +659,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     
     // MARK: - Server Management
     
-    func getServerBinaryPath() -> URL? {
-        // First, check if bundled in app Resources
-        if let resourcePath = Bundle.main.resourcePath {
-            let bundledPath = URL(fileURLWithPath: resourcePath).appendingPathComponent("pocket-tts-cli")
-            if FileManager.default.fileExists(atPath: bundledPath.path) {
-                return bundledPath
-            }
-        }
-        
-        // Also check forResource (for when it's a proper resource)
-        if let bundledPath = Bundle.main.url(forResource: "pocket-tts-cli", withExtension: nil) {
-            return bundledPath
-        }
-        
-        // Fallback: check common locations
-        let possiblePaths = [
-            "/usr/local/bin/pocket-tts-cli",
-            "/opt/homebrew/bin/pocket-tts-cli",
-            NSHomeDirectory() + "/.local/bin/pocket-tts-cli",
-            // Development path
-            NSHomeDirectory() + "/work/ml/pocket-tts/target/release/pocket-tts-cli"
-        ]
-        
-        for path in possiblePaths {
-            if FileManager.default.fileExists(atPath: path) {
-                return URL(fileURLWithPath: path)
-            }
-        }
-        
-        return nil
-    }
-    
-    func getBundledModelsPath() -> URL? {
-        // Check if models are bundled in app Resources
-        if let resourcePath = Bundle.main.resourcePath {
-            let modelsPath = URL(fileURLWithPath: resourcePath).appendingPathComponent("models")
-            let weightsFile = modelsPath.appendingPathComponent("tts_b6369a24.safetensors")
-            if FileManager.default.fileExists(atPath: weightsFile.path) {
-                return modelsPath
-            }
-        }
-        return nil
-    }
-    
     func getModelCachePath() -> URL {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let pocketTTSDir = appSupport.appendingPathComponent("Loqui")
+        let pocketTTSDir = appSupport.appendingPathComponent("Loqui").appendingPathComponent("FluidAudio")
         try? FileManager.default.createDirectory(at: pocketTTSDir, withIntermediateDirectories: true)
         return pocketTTSDir
-    }
-    
-    /// Set up HuggingFace cache structure from bundled models
-    /// This copies bundled model files into the HF cache format so the CLI finds them
-    func setupBundledModelsCache() {
-        guard let bundledModels = getBundledModelsPath() else { return }
-        
-        let fm = FileManager.default
-        let hfHome = getModelCachePath()
-        let hubDir = hfHome.appendingPathComponent("hub")
-        
-        // Model file mappings: (bundled name, repo, revision, path in snapshot, blob hash)
-        let modelFiles: [(String, String, String, String, String)] = [
-            // Main model weights
-            ("tts_b6369a24.safetensors", "models--kyutai--pocket-tts", 
-             "427e3d61b276ed69fdd03de0d185fa8a8d97fc5b", "tts_b6369a24.safetensors",
-             "a4246e239af0f35a1c495b6d180961a6f10b379dc24dd537f64c695c08e4e216"),
-            // Tokenizer
-            ("tokenizer.model", "models--kyutai--pocket-tts-without-voice-cloning",
-             "d4fdd22ae8c8e1cb3634e150ebeff1dab2d16df3", "tokenizer.model",
-             "d461765ae179566678c93091c5fa6f2984c31bbe990bf1aa62d92c64d91bc3f6"),
-            // Voice embeddings
-            ("fantine.safetensors", "models--kyutai--pocket-tts-without-voice-cloning",
-             "2578fed2380333b621689eaed6fe144cf69dfeb3", "embeddings/fantine.safetensors",
-             "b6918a2ece002d2d9037ff53c4ea38730175e8798786658b0958443edf49d355"),
-            ("alba.safetensors", "models--kyutai--pocket-tts-without-voice-cloning",
-             "2578fed2380333b621689eaed6fe144cf69dfeb3", "embeddings/alba.safetensors",
-             "ad234695323e4030336b6afc8a050c97e3110603e11ecd8226d9562488300a50"),
-        ]
-        
-        for (bundledName, repo, revision, snapshotPath, blobHash) in modelFiles {
-            let sourceFile = bundledModels.appendingPathComponent(bundledName)
-            guard fm.fileExists(atPath: sourceFile.path) else { continue }
-            
-            let repoDir = hubDir.appendingPathComponent(repo)
-            let blobsDir = repoDir.appendingPathComponent("blobs")
-            let snapshotDir = repoDir.appendingPathComponent("snapshots").appendingPathComponent(revision)
-            
-            // Create directories
-            try? fm.createDirectory(at: blobsDir, withIntermediateDirectories: true)
-            let snapshotFileDir = snapshotDir.appendingPathComponent(snapshotPath).deletingLastPathComponent()
-            try? fm.createDirectory(at: snapshotFileDir, withIntermediateDirectories: true)
-            
-            // Copy to blobs if not exists
-            let blobFile = blobsDir.appendingPathComponent(blobHash)
-            if !fm.fileExists(atPath: blobFile.path) {
-                try? fm.copyItem(at: sourceFile, to: blobFile)
-            }
-            
-            // Create symlink in snapshot
-            let snapshotFile = snapshotDir.appendingPathComponent(snapshotPath)
-            if !fm.fileExists(atPath: snapshotFile.path) {
-                // Calculate relative path from snapshot to blob
-                let relativePath = "../../blobs/\(blobHash)"
-                try? fm.createSymbolicLink(atPath: snapshotFile.path, withDestinationPath: relativePath)
-            }
-        }
     }
     
     func startServer() {
@@ -657,86 +672,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
 
-        if serverProcess?.isRunning == true {
-            return
-        }
-
-        guard getServerBinaryPath() != nil else {
-            showAlert(title: "Server Binary Not Found", 
-                     message: "Could not find pocket-tts-cli. Please ensure it's installed or bundled with the app.")
-            updateStatusIcon(running: false)
-            return
-        }
-        
-        // Set up bundled models in HF cache format
-        setupBundledModelsCache()
-        
-        let process = Process()
-        
-        // Use /bin/bash to ensure we cd into the right directory before running
-        // This is more reliable than Process.currentDirectoryURL
-        guard let resourcePath = Bundle.main.resourcePath else {
-            showAlert(title: "Resource Path Not Found",
-                     message: "Could not find app Resources directory.")
-            updateStatusIcon(running: false)
-            return
-        }
-        
-        let voicePath = "\(resourcePath)/models/embeddings/\(selectedVoice).safetensors"
-        
-        process.executableURL = URL(fileURLWithPath: "/bin/bash")
-        process.arguments = [
-            "-c",
-            "cd '\(resourcePath)' && ./pocket-tts-cli serve --port \(serverPort) --host \(serverHost) --voice '\(voicePath)'"
-        ]
-        
-        print("Loqui: Starting server from: \(resourcePath)")
-        print("Loqui: Using voice: \(voicePath)")
-        
-        // Set up environment
-        var env = ProcessInfo.processInfo.environment
-        
-        // Use app's cache directory for HuggingFace cache
-        let cacheDir = getModelCachePath()
-        env["HF_HOME"] = cacheDir.path
-        
-        // Set voices directory for local voice resolution
-        env["POCKET_TTS_VOICES_DIR"] = "\(resourcePath)/models/embeddings"
-        
-        process.environment = env
-        
-        // Capture output for debugging
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        
-        process.terminationHandler = { [weak self] process in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                let wasStopping = self.isStoppingServer
-                self.isStoppingServer = false
-                self.serverProcess = nil
-                self.updateStatusIcon(running: false)
-
-                if !wasStopping, self.serverEnabled, process.terminationStatus != 0 {
-                    self.showAlert(title: "Server Stopped", 
-                                   message: "TTS server exited with code \(process.terminationStatus)")
-                }
-            }
-        }
-        
-        do {
-            try process.run()
-            serverProcess = process
-            
-            // Wait a bit then check health
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-                self?.checkServerHealth()
-            }
-        } catch {
-            showAlert(title: "Failed to Start Server", message: error.localizedDescription)
-            updateStatusIcon(running: false)
-        }
+        startLocalBroker()
     }
     
     func checkServerHealth() {
@@ -744,10 +680,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         Task {
             do {
-                let url = URL(string: "http://\(serverHost):\(serverPort)/health")!
-                let (_, response) = try await URLSession.shared.data(from: url)
-                
-                if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 {
+                let healthy = try await TTSClient(socketPath: socketPath).healthCheck()
+
+                if healthy {
                     await MainActor.run {
                         updateStatusIcon(running: true)
                     }
@@ -761,7 +696,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             } catch {
                 // Server not ready yet, retry
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
-                if serverEnabled, serverProcess?.isRunning == true {
+                if serverEnabled, localBroker != nil {
                     checkServerHealth()
                 }
             }
@@ -769,11 +704,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     
     func stopServer() {
-        if let process = serverProcess {
-            isStoppingServer = true
-            process.terminate()
-            serverProcess = nil
-        }
+        stopLocalBroker()
         updateStatusIcon(running: false)
     }
     
@@ -864,12 +795,18 @@ private struct BrokerResponse: Encodable {
     let pending: Int?
     let playing: Bool?
     let currentQueue: String?
+    let voices: [String]?
+    let audioBase64: String?
+    let contentType: String?
 
     static func success(
         queued: Int? = nil,
         pending: Int? = nil,
         playing: Bool? = nil,
-        currentQueue: String? = nil
+        currentQueue: String? = nil,
+        voices: [String]? = nil,
+        audioBase64: String? = nil,
+        contentType: String? = nil
     ) -> BrokerResponse {
         BrokerResponse(
             ok: true,
@@ -877,12 +814,66 @@ private struct BrokerResponse: Encodable {
             queued: queued,
             pending: pending,
             playing: playing,
-            currentQueue: currentQueue
+            currentQueue: currentQueue,
+            voices: voices,
+            audioBase64: audioBase64,
+            contentType: contentType
         )
     }
 
     static func failure(_ message: String) -> BrokerResponse {
-        BrokerResponse(ok: false, error: message, queued: nil, pending: nil, playing: nil, currentQueue: nil)
+        BrokerResponse(
+            ok: false,
+            error: message,
+            queued: nil,
+            pending: nil,
+            playing: nil,
+            currentQueue: nil,
+            voices: nil,
+            audioBase64: nil,
+            contentType: nil
+        )
+    }
+}
+
+private enum UnixSocketListener {
+    static func make(path: String) throws -> NWListener {
+        try LoquiSocketPaths.prepareDirectory()
+        try? FileManager.default.removeItem(atPath: path)
+
+        let parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = .unix(path: path)
+        return try NWListener(using: parameters)
+    }
+
+    static func cleanup(path: String) {
+        try? FileManager.default.removeItem(atPath: path)
+    }
+}
+
+private actor FluidPocketTTSEngine {
+    private let manager: PocketTtsManager
+    private var initialized = false
+
+    init(modelDirectory: URL, defaultVoice: String) {
+        manager = PocketTtsManager(
+            defaultVoice: defaultVoice,
+            language: .english,
+            directory: modelDirectory
+        )
+    }
+
+    func synthesizeWav(text: String, voice: String?) async throws -> Data {
+        if !initialized {
+            try await manager.initialize()
+            initialized = true
+        }
+
+        let trimmedVoice = voice?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return try await manager.synthesize(
+            text: text,
+            voice: trimmedVoice?.isEmpty == false ? trimmedVoice : nil
+        )
     }
 }
 
@@ -1208,15 +1199,12 @@ final class SpeechPlaybackCoordinator {
     private var autoVoiceByQueueKey: [String: String] = [:]
     private var autoVoiceCycleIndex = 0
 
-    private let hostProvider: () -> String
-    private let portProvider: () -> Int
+    private let socketPathProvider: () -> String
     private let defaultVoiceProvider: () -> String
 
-    init(hostProvider: @escaping () -> String,
-         portProvider: @escaping () -> Int,
+    init(socketPathProvider: @escaping () -> String,
          defaultVoiceProvider: @escaping () -> String) {
-        self.hostProvider = hostProvider
-        self.portProvider = portProvider
+        self.socketPathProvider = socketPathProvider
         self.defaultVoiceProvider = defaultVoiceProvider
     }
 
@@ -1269,7 +1257,7 @@ final class SpeechPlaybackCoordinator {
         }
     }
 
-    func stopAll() {
+    func stopAll(cancelActiveSynthesis: Bool = true) {
         let state = queue.sync { () -> (pending: [UUID], active: UUID?) in
             let pendingIds = allPendingHistoryIdsLocked()
             let activeId = currentJobHistoryId
@@ -1294,8 +1282,10 @@ final class SpeechPlaybackCoordinator {
             RequestHistoryStore.shared.updateStatus(id: activeId, to: .interrupted)
         }
 
-        Task {
-            await sendStopToServer()
+        if cancelActiveSynthesis {
+            Task {
+                await sendStopToServer()
+            }
         }
     }
 
@@ -1426,22 +1416,7 @@ final class SpeechPlaybackCoordinator {
     }
 
     private func synthesize(job: SpeechJob) async throws -> Data {
-        let url = URL(string: "http://\(hostProvider()):\(portProvider())/stream")!
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 30
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        let body = ["text": job.text, "voice": job.voice]
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse,
-              httpResponse.statusCode == 200 else {
-            throw NSError(domain: "Loqui", code: 500, userInfo: [NSLocalizedDescriptionKey: "Failed to synthesize speech"])
-        }
-
-        return data
+        try await TTSClient(socketPath: socketPathProvider()).synthesize(text: job.text, voice: job.voice)
     }
 
     private func play(audioData: Data) async throws {
@@ -1459,15 +1434,19 @@ final class SpeechPlaybackCoordinator {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: ffplayPath)
-        process.arguments = [
+        var arguments = [
             "-f", "s16le",
             "-ar", "24000",
             "-ch_layout", "mono",
             "-nodisp",
             "-autoexit",
-            "-loglevel", "quiet",
-            tempURL.path
+            "-loglevel", "quiet"
         ]
+        if let tempoFilter = localPlaybackTempoFilter() {
+            arguments.append(contentsOf: ["-af", tempoFilter])
+        }
+        arguments.append(tempURL.path)
+        process.arguments = arguments
 
         try process.run()
 
@@ -1496,6 +1475,18 @@ final class SpeechPlaybackCoordinator {
         return nil
     }
 
+    private func configuredSpeechSpeed() -> Double {
+        let raw = UserDefaults.standard.object(forKey: "speechSpeed") as? Double ?? 1.0
+        let rounded = (raw * 100).rounded() / 100
+        return min(2.0, max(0.7, rounded))
+    }
+
+    private func localPlaybackTempoFilter() -> String? {
+        let speed = configuredSpeechSpeed()
+        guard abs(speed - 1.0) > 0.01 else { return nil }
+        return String(format: "atempo=%.2f", speed)
+    }
+
     private func terminateCurrentProcessLocked() {
         guard let process = currentProcess else { return }
 
@@ -1512,10 +1503,7 @@ final class SpeechPlaybackCoordinator {
     }
 
     private func sendStopToServer() async {
-        let stopURL = URL(string: "http://\(hostProvider()):\(portProvider())/stop")!
-        var request = URLRequest(url: stopURL)
-        request.httpMethod = "POST"
-        _ = try? await URLSession.shared.data(for: request)
+        try? await TTSClient(socketPath: socketPathProvider()).stop()
     }
 
     private func resolveVoiceForQueueLocked(requestedVoice: String?, queueKey: String) -> String {
@@ -1600,18 +1588,27 @@ final class SpeechPlaybackCoordinator {
 
 final class LocalSpeechBroker {
     private let listener: NWListener
+    private let socketPath: String
     private let queue = DispatchQueue(label: "loqui.local.broker")
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private let coordinator: SpeechPlaybackCoordinator
+    private let engine: FluidPocketTTSEngine
+    private let defaultVoiceProvider: () -> String
+    private let activeTasksLock = NSLock()
+    private var activeTasks: [UUID: Task<Void, Never>] = [:]
 
-    init(port: Int, coordinator: SpeechPlaybackCoordinator) throws {
-        guard let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else {
-            throw NSError(domain: "Loqui", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid broker port: \(port)"])
-        }
-
-        self.listener = try NWListener(using: .tcp, on: nwPort)
+    init(
+        socketPath: String,
+        modelDirectory: URL,
+        coordinator: SpeechPlaybackCoordinator,
+        defaultVoiceProvider: @escaping () -> String
+    ) throws {
+        self.socketPath = socketPath
+        self.listener = try UnixSocketListener.make(path: socketPath)
         self.coordinator = coordinator
+        self.defaultVoiceProvider = defaultVoiceProvider
+        self.engine = FluidPocketTTSEngine(modelDirectory: modelDirectory, defaultVoice: defaultVoiceProvider())
     }
 
     func start() {
@@ -1634,7 +1631,9 @@ final class LocalSpeechBroker {
     }
 
     func stop() {
+        stopActiveRequests()
         listener.cancel()
+        UnixSocketListener.cleanup(path: socketPath)
     }
 
     private func handle(connection: NWConnection) {
@@ -1693,6 +1692,9 @@ final class LocalSpeechBroker {
             let state = coordinator.state()
             send(response: .success(pending: state.pending, playing: state.playing, currentQueue: state.currentQueue), on: connection)
 
+        case "voices":
+            send(response: .success(voices: TTSClient.availableVoices), on: connection)
+
         case "speak":
             guard let text = request.text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 send(response: .failure("Missing text"), on: connection)
@@ -1708,14 +1710,126 @@ final class LocalSpeechBroker {
             )
             send(response: .success(queued: queued), on: connection)
 
+        case "raw":
+            synthesize(request: request, response: .rawPCM, on: connection)
+
+        case "generate":
+            synthesize(request: request, response: .wav, on: connection)
+
         case "stop":
-            coordinator.stopAll()
+            stopActiveRequests()
+            coordinator.stopAll(cancelActiveSynthesis: false)
             let state = coordinator.state()
             send(response: .success(pending: state.pending, playing: state.playing, currentQueue: state.currentQueue), on: connection)
 
         default:
             send(response: .failure("Unknown command: \(request.type)"), on: connection)
         }
+    }
+
+    private enum SynthesisResponse {
+        case rawPCM
+        case wav
+    }
+
+    private func synthesize(request: BrokerRequest, response: SynthesisResponse, on connection: NWConnection) {
+        guard let text = request.text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
+            send(response: .failure("Missing text"), on: connection)
+            return
+        }
+
+        let taskID = UUID()
+        let task = Task { [weak self] in
+            guard let self else { return }
+            defer { self.removeActiveTask(taskID) }
+
+            do {
+                let wavData = try await self.engine.synthesizeWav(
+                    text: text,
+                    voice: request.voice ?? self.defaultVoiceProvider()
+                )
+                guard !Task.isCancelled else {
+                    connection.cancel()
+                    return
+                }
+
+                switch response {
+                case .rawPCM:
+                    let pcmData = try Self.extractPCMData(fromWav: wavData)
+                    self.send(
+                        response: .success(
+                            audioBase64: pcmData.base64EncodedString(),
+                            contentType: "audio/L16; rate=24000; channels=1"
+                        ),
+                        on: connection
+                    )
+                case .wav:
+                    self.send(
+                        response: .success(
+                            audioBase64: wavData.base64EncodedString(),
+                            contentType: "audio/wav"
+                        ),
+                        on: connection
+                    )
+                }
+            } catch {
+                guard !Task.isCancelled else {
+                    connection.cancel()
+                    return
+                }
+                self.send(response: .failure(error.localizedDescription), on: connection)
+            }
+        }
+
+        activeTasksLock.lock()
+        activeTasks[taskID] = task
+        activeTasksLock.unlock()
+    }
+
+    private func stopActiveRequests() {
+        activeTasksLock.lock()
+        let tasks = activeTasks.values
+        activeTasks.removeAll()
+        activeTasksLock.unlock()
+
+        for task in tasks {
+            task.cancel()
+        }
+    }
+
+    private func removeActiveTask(_ taskID: UUID) {
+        activeTasksLock.lock()
+        activeTasks.removeValue(forKey: taskID)
+        activeTasksLock.unlock()
+    }
+
+    private static func extractPCMData(fromWav wavData: Data) throws -> Data {
+        guard wavData.count >= 12,
+              String(data: wavData.subdata(in: 0..<4), encoding: .ascii) == "RIFF",
+              String(data: wavData.subdata(in: 8..<12), encoding: .ascii) == "WAVE"
+        else {
+            throw NSError(domain: "Loqui", code: 2, userInfo: [NSLocalizedDescriptionKey: "Invalid WAV response from FluidAudio"])
+        }
+
+        var offset = 12
+        while offset + 8 <= wavData.count {
+            let chunkID = String(data: wavData.subdata(in: offset..<(offset + 4)), encoding: .ascii)
+            let chunkSize = wavData.withUnsafeBytes { rawBuffer -> UInt32 in
+                let base = rawBuffer.baseAddress!.advanced(by: offset + 4)
+                return base.loadUnaligned(as: UInt32.self).littleEndian
+            }
+            let dataStart = offset + 8
+            let dataEnd = dataStart + Int(chunkSize)
+
+            guard dataEnd <= wavData.count else { break }
+            if chunkID == "data" {
+                return wavData.subdata(in: dataStart..<dataEnd)
+            }
+
+            offset = dataEnd + (Int(chunkSize) % 2)
+        }
+
+        throw NSError(domain: "Loqui", code: 3, userInfo: [NSLocalizedDescriptionKey: "WAV data chunk not found"])
     }
 
     private func send(response: BrokerResponse, on connection: NWConnection) {
@@ -1732,9 +1846,27 @@ final class LocalSpeechBroker {
             return
         }
 
-        connection.send(content: payload, completion: .contentProcessed { _ in
-            connection.cancel()
-        })
+        sendPayload(payload, on: connection)
+    }
+
+    private func sendPayload(_ payload: Data, on connection: NWConnection, offset: Int = 0) {
+        let chunkSize = 16 * 1024
+        guard offset < payload.count else {
+            return
+        }
+
+        let end = min(offset + chunkSize, payload.count)
+        let isFinal = end == payload.count
+        connection.send(
+            content: payload.subdata(in: offset..<end),
+            contentContext: .defaultMessage,
+            isComplete: isFinal,
+            completion: .contentProcessed { [weak self] _ in
+                if !isFinal {
+                    self?.sendPayload(payload, on: connection, offset: end)
+                }
+            }
+        )
     }
 }
 
@@ -1768,12 +1900,11 @@ struct SettingsView: View {
 
 struct GeneralSettingsView: View {
     @AppStorage("ttsVoice") var voice = "fantine"
-    @AppStorage("ttsPort") var port = 18080
+    @AppStorage("speechSpeed") var speechSpeed = 1.0
     @AppStorage("launchAtLogin") var launchAtLogin = false
     @AppStorage("showDockIcon") var showDockIcon = true
     @AppStorage("serverEnabled") var serverEnabled = true
     @State private var isPreviewPlaying = false
-    @State private var portString = ""
     
     // All available voices from kyutai/pocket-tts
     let availableVoices = ["alba", "marius", "javert", "fantine", "cosette", "eponine", "azelma"]
@@ -1814,37 +1945,51 @@ struct GeneralSettingsView: View {
                 }
             }
 
+            Section("Playback") {
+                HStack(spacing: 10) {
+                    Image(systemName: "tortoise")
+                        .foregroundStyle(.secondary)
+
+                    Slider(value: $speechSpeed, in: 0.7...2.0, step: 0.05)
+
+                    Image(systemName: "hare")
+                        .foregroundStyle(.secondary)
+
+                    Text(String(format: "%.1fx", clampedSpeechSpeed))
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 40, alignment: .trailing)
+                }
+                .help("Speech speed: \(String(format: "%.2f", clampedSpeechSpeed))x")
+
+                Button("Reset Speed") {
+                    speechSpeed = 1.0
+                }
+                .disabled(abs(clampedSpeechSpeed - 1.0) < 0.01)
+            }
+
             Section("Server") {
                 Toggle("Enable Server", isOn: $serverEnabled)
-                    .onChange(of: serverEnabled) { _ in
+                    .onChange(of: serverEnabled) {
                         updateServerEnabled()
                     }
 
                 HStack {
-                    Text("Port")
+                    Text("API")
                     Spacer()
-                    TextField("", text: $portString)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 90)
-                        .multilineTextAlignment(.center)
-                    Button("Apply") {
-                        if let newPort = Int(portString), newPort > 0 {
-                            port = newPort
-                            restartServerForSettingsChange()
-                        }
-                    }
-                    .disabled(!serverEnabled || Int(portString) == port)
+                    Text("Unix sockets")
+                        .foregroundColor(.secondary)
                 }
             }
 
             Section("General") {
                 Toggle("Launch at Login", isOn: $launchAtLogin)
-                    .onChange(of: launchAtLogin) { newValue in
-                        setLaunchAtLogin(enabled: newValue)
+                    .onChange(of: launchAtLogin) {
+                        setLaunchAtLogin(enabled: launchAtLogin)
                     }
 
                 Toggle("Show Dock Icon", isOn: $showDockIcon)
-                    .onChange(of: showDockIcon) { _ in
+                    .onChange(of: showDockIcon) {
                         updateDockIcon()
                     }
             }
@@ -1859,9 +2004,16 @@ struct GeneralSettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .onAppear {
-            portString = String(port)
-        }
+    }
+
+    private var clampedSpeechSpeed: Double {
+        min(2.0, max(0.7, speechSpeed))
+    }
+
+    private var previewTempoFilter: String? {
+        let speed = (clampedSpeechSpeed * 100).rounded() / 100
+        guard abs(speed - 1.0) > 0.01 else { return nil }
+        return String(format: "atempo=%.2f", speed)
     }
     
     func updateDockIcon() {
@@ -1880,31 +2032,16 @@ struct GeneralSettingsView: View {
         }
     }
 
-    func restartServerForSettingsChange() {
-        // Find the app delegate and restart the server
-        if let appDelegate = NSApp.delegate as? AppDelegate {
-            appDelegate.restartServer()
-        }
-    }
-    
     func previewVoice(_ voiceName: String) {
         guard !isPreviewPlaying else { return }
         isPreviewPlaying = true
         
         let text = "Hi, this is \(voiceName.capitalized)."
+        let tempoFilter = previewTempoFilter
         
         Task {
             do {
-                // Call the TTS server to get audio
-                let url = URL(string: "http://127.0.0.1:\(port)/stream")!
-                var request = URLRequest(url: url)
-                request.httpMethod = "POST"
-                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                
-                let body = ["text": text, "voice": voiceName]
-                request.httpBody = try JSONSerialization.data(withJSONObject: body)
-                
-                let (data, _) = try await URLSession.shared.data(for: request)
+                let data = try await TTSClient().synthesize(text: text, voice: voiceName)
                 
                 // Write PCM data to temp file and play with afplay
                 let tempFile = FileManager.default.temporaryDirectory.appendingPathComponent("voice_preview.raw")
@@ -1915,15 +2052,19 @@ struct GeneralSettingsView: View {
                 if FileManager.default.fileExists(atPath: ffplayPath) {
                     let process = Process()
                     process.executableURL = URL(fileURLWithPath: ffplayPath)
-                    process.arguments = [
+                    var arguments = [
                         "-f", "s16le",
                         "-ar", "24000",
                         "-ch_layout", "mono",
                         "-nodisp",
                         "-autoexit",
-                        "-loglevel", "quiet",
-                        tempFile.path
+                        "-loglevel", "quiet"
                     ]
+                    if let tempoFilter {
+                        arguments.append(contentsOf: ["-af", tempoFilter])
+                    }
+                    arguments.append(tempFile.path)
+                    process.arguments = arguments
                     process.terminationHandler = { _ in
                         DispatchQueue.main.async {
                             self.isPreviewPlaying = false
@@ -1963,6 +2104,7 @@ struct HistoryView: View {
     @State private var searchText = ""
     @State private var selectedAppFilter = Self.allAppsToken
     @State private var selectedSessionFilter = Self.allSessionsToken
+    @State private var derivedState = DerivedState.empty
 
     private static let allAppsToken = "__all_apps__"
     private static let allSessionsToken = "__all_sessions__"
@@ -1975,71 +2117,24 @@ struct HistoryView: View {
         return formatter
     }()
 
-    private var availableApps: [String] {
-        let apps = Set(historyStore.entries.map { normalizedAppName($0.sourceApp) })
-        return apps.sorted()
-    }
+    private struct DerivedState {
+        let totalEntryCount: Int
+        let appFilterOptions: [String]
+        let sessionFilterOptions: [String]
+        let isFiltering: Bool
+        let filteredEntries: [RequestHistoryEntry]
+        let queueEntries: [RequestHistoryEntry]
+        let completedEntries: [RequestHistoryEntry]
 
-    private var availableSessions: [String] {
-        let sessions = Set(historyStore.entries.compactMap { normalizedSessionId($0.sessionId) })
-        return sessions.sorted()
-    }
-
-    private var appFilterOptions: [String] {
-        [Self.allAppsToken] + availableApps
-    }
-
-    private var sessionFilterOptions: [String] {
-        var options = [Self.allSessionsToken]
-        if historyStore.entries.contains(where: { normalizedSessionId($0.sessionId) == nil }) {
-            options.append(Self.noSessionToken)
-        }
-        options.append(contentsOf: availableSessions)
-        return options
-    }
-
-    private var isFiltering: Bool {
-        !searchText.isEmpty || selectedAppFilter != Self.allAppsToken || selectedSessionFilter != Self.allSessionsToken
-    }
-
-    private var filteredEntries: [RequestHistoryEntry] {
-        historyStore.entries.filter { entry in
-            if !searchText.isEmpty {
-                let searchLower = searchText.lowercased()
-                let textMatches = entry.text.lowercased().contains(searchLower)
-                let appMatches = normalizedAppName(entry.sourceApp).lowercased().contains(searchLower)
-                let sessionMatches = (entry.sessionId?.lowercased().contains(searchLower) ?? false)
-                if !textMatches && !appMatches && !sessionMatches {
-                    return false
-                }
-            }
-
-            if selectedAppFilter != Self.allAppsToken,
-               normalizedAppName(entry.sourceApp) != selectedAppFilter {
-                return false
-            }
-
-            if selectedSessionFilter == Self.noSessionToken {
-                return normalizedSessionId(entry.sessionId) == nil
-            }
-
-            if selectedSessionFilter != Self.allSessionsToken,
-               normalizedSessionId(entry.sessionId) != selectedSessionFilter {
-                return false
-            }
-
-            return true
-        }
-    }
-
-    private var queueEntries: [RequestHistoryEntry] {
-        filteredEntries
-            .filter { $0.status.isInQueue }
-            .sorted { $0.timestamp < $1.timestamp }
-    }
-
-    private var completedEntries: [RequestHistoryEntry] {
-        filteredEntries.filter { !$0.status.isInQueue }
+        static let empty = DerivedState(
+            totalEntryCount: 0,
+            appFilterOptions: [HistoryView.allAppsToken],
+            sessionFilterOptions: [HistoryView.allSessionsToken],
+            isFiltering: false,
+            filteredEntries: [],
+            queueEntries: [],
+            completedEntries: []
+        )
     }
 
     var body: some View {
@@ -2050,12 +2145,12 @@ struct HistoryView: View {
                         Text("History")
                             .font(.title2)
                             .fontWeight(.semibold)
-                        Text("\(queueEntries.count) queued · \(completedEntries.count) completed")
+                        Text("\(derivedState.queueEntries.count) queued · \(derivedState.completedEntries.count) completed")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
                     Spacer()
-                    if isFiltering {
+                    if derivedState.isFiltering {
                         Button("Reset Filters") {
                             searchText = ""
                             selectedAppFilter = Self.allAppsToken
@@ -2071,7 +2166,7 @@ struct HistoryView: View {
                             .foregroundColor(.secondary)
                     }
                     .buttonStyle(.plain)
-                    .disabled(historyStore.entries.isEmpty)
+                    .disabled(derivedState.totalEntryCount == 0)
                     .help("Clear all history")
                 }
 
@@ -2090,7 +2185,7 @@ struct HistoryView: View {
 
                 HStack(spacing: 8) {
                     Picker("App", selection: $selectedAppFilter) {
-                        ForEach(appFilterOptions, id: \.self) { option in
+                        ForEach(derivedState.appFilterOptions, id: \.self) { option in
                             Text(appFilterLabel(option)).tag(option)
                         }
                     }
@@ -2098,7 +2193,7 @@ struct HistoryView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
 
                     Picker("Session", selection: $selectedSessionFilter) {
-                        ForEach(sessionFilterOptions, id: \.self) { option in
+                        ForEach(derivedState.sessionFilterOptions, id: \.self) { option in
                             Text(sessionFilterLabel(option)).tag(option)
                         }
                     }
@@ -2111,13 +2206,13 @@ struct HistoryView: View {
 
             Divider()
 
-            if historyStore.entries.isEmpty {
+            if derivedState.totalEntryCount == 0 {
                 emptyState(
                     icon: "bubble.left.and.bubble.right",
                     title: "No requests yet",
                     subtitle: "Speech requests will appear here"
                 )
-            } else if filteredEntries.isEmpty {
+            } else if derivedState.filteredEntries.isEmpty {
                 emptyState(
                     icon: "magnifyingglass",
                     title: "No matches",
@@ -2125,9 +2220,9 @@ struct HistoryView: View {
                 )
             } else {
                 List {
-                    if !queueEntries.isEmpty {
+                    if !derivedState.queueEntries.isEmpty {
                         Section {
-                            ForEach(queueEntries) { entry in
+                            ForEach(derivedState.queueEntries) { entry in
                                 entryRow(entry)
                             }
                         } header: {
@@ -2138,7 +2233,7 @@ struct HistoryView: View {
                     }
 
                     Section {
-                        ForEach(completedEntries) { entry in
+                        ForEach(derivedState.completedEntries) { entry in
                             entryRow(entry)
                         }
                     } header: {
@@ -2150,15 +2245,84 @@ struct HistoryView: View {
                 .listStyle(.inset)
             }
         }
-        .onChange(of: appFilterOptions) { options in
-            if selectedAppFilter != Self.allAppsToken && !options.contains(selectedAppFilter) {
-                selectedAppFilter = Self.allAppsToken
-            }
+        .onAppear { recomputeDerivedState() }
+        .onReceive(historyStore.$entries) { _ in recomputeDerivedState() }
+        .onChange(of: searchText) { recomputeDerivedState() }
+        .onChange(of: selectedAppFilter) { recomputeDerivedState() }
+        .onChange(of: selectedSessionFilter) { recomputeDerivedState() }
+    }
+
+    private func recomputeDerivedState() {
+        let entries = historyStore.entries
+
+        let appOptions = [Self.allAppsToken] + Set(entries.map { normalizedAppName($0.sourceApp) }).sorted()
+
+        var sessionOptions = [Self.allSessionsToken]
+        if entries.contains(where: { normalizedSessionId($0.sessionId) == nil }) {
+            sessionOptions.append(Self.noSessionToken)
         }
-        .onChange(of: sessionFilterOptions) { options in
-            if selectedSessionFilter != Self.allSessionsToken && !options.contains(selectedSessionFilter) {
-                selectedSessionFilter = Self.allSessionsToken
+        sessionOptions.append(contentsOf: Set(entries.compactMap { normalizedSessionId($0.sessionId) }).sorted())
+
+        var resolvedAppFilter = selectedAppFilter
+        var resolvedSessionFilter = selectedSessionFilter
+
+        if resolvedAppFilter != Self.allAppsToken && !appOptions.contains(resolvedAppFilter) {
+            resolvedAppFilter = Self.allAppsToken
+        }
+        if resolvedSessionFilter != Self.allSessionsToken && !sessionOptions.contains(resolvedSessionFilter) {
+            resolvedSessionFilter = Self.allSessionsToken
+        }
+
+        let searchLower = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+        let filteredEntries = entries.filter { entry in
+            if !searchLower.isEmpty {
+                let textMatches = entry.text.lowercased().contains(searchLower)
+                let appMatches = normalizedAppName(entry.sourceApp).lowercased().contains(searchLower)
+                let sessionMatches = (entry.sessionId?.lowercased().contains(searchLower) ?? false)
+                if !textMatches && !appMatches && !sessionMatches {
+                    return false
+                }
             }
+
+            if resolvedAppFilter != Self.allAppsToken,
+               normalizedAppName(entry.sourceApp) != resolvedAppFilter {
+                return false
+            }
+
+            if resolvedSessionFilter == Self.noSessionToken {
+                return normalizedSessionId(entry.sessionId) == nil
+            }
+
+            if resolvedSessionFilter != Self.allSessionsToken,
+               normalizedSessionId(entry.sessionId) != resolvedSessionFilter {
+                return false
+            }
+
+            return true
+        }
+
+        let queueEntries = filteredEntries
+            .filter { $0.status.isInQueue }
+            .sorted { $0.timestamp < $1.timestamp }
+        let completedEntries = filteredEntries.filter { !$0.status.isInQueue }
+        let isFiltering = !searchLower.isEmpty || resolvedAppFilter != Self.allAppsToken || resolvedSessionFilter != Self.allSessionsToken
+
+        derivedState = DerivedState(
+            totalEntryCount: entries.count,
+            appFilterOptions: appOptions,
+            sessionFilterOptions: sessionOptions,
+            isFiltering: isFiltering,
+            filteredEntries: filteredEntries,
+            queueEntries: queueEntries,
+            completedEntries: completedEntries
+        )
+
+        if selectedAppFilter != resolvedAppFilter {
+            selectedAppFilter = resolvedAppFilter
+        }
+        if selectedSessionFilter != resolvedSessionFilter {
+            selectedSessionFilter = resolvedSessionFilter
         }
     }
 
@@ -2169,7 +2333,11 @@ struct HistoryView: View {
 
     private func normalizedSessionId(_ sessionId: String?) -> String? {
         let trimmed = sessionId?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return (trimmed?.isEmpty == false) ? trimmed : nil
+        guard let value = trimmed, !value.isEmpty else { return nil }
+        if UUID(uuidString: value) != nil { return nil }
+        let hexDash = value.filter { $0.isHexDigit || $0 == "-" }
+        if hexDash.count > value.count / 2 && value.count > 8 { return nil }
+        return value
     }
 
     private func appFilterLabel(_ option: String) -> String {
@@ -2294,37 +2462,36 @@ struct HelpView: View {
 
                 helpSection(title: "CLI Usage", icon: "chevron.left.forwardslash.chevron.right") {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Use ptts in Terminal:")
+                        Text("Use loqui in Terminal:")
                             .font(.callout)
                             .foregroundColor(.secondary)
                         VStack(alignment: .leading, spacing: 4) {
-                            CodeRow(code: "ptts \"Hello, world!\"", description: "Enqueue speech")
-                            CodeRow(code: "ptts -v alba \"Hello\"", description: "Pick a voice")
-                            CodeRow(code: "echo \"Hello\" | ptts", description: "Pipe input")
-                            CodeRow(code: "ptts --stop", description: "Stop playback")
+                            CodeRow(code: "loqui say \"Hello, world!\"", description: "Enqueue speech")
+                            CodeRow(code: "loqui say -v alba \"Hello\"", description: "Pick a voice")
+                            CodeRow(code: "echo \"Hello\" | loqui say", description: "Pipe input")
+                            CodeRow(code: "loqui stop", description: "Stop playback")
                         }
                     }
                 }
 
-                helpSection(title: "HTTP API", icon: "network") {
+                helpSection(title: "Local API", icon: "network") {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Direct synthesis endpoint:")
+                        Text("Unified local socket:")
                             .font(.callout)
                             .foregroundColor(.secondary)
-                        CodeRow(code: "POST http://127.0.0.1:18080/stream", description: "Stream PCM audio")
-                        CodeRow(code: "{\"text\":\"Hello\",\"voice\":\"fantine\"}", description: "JSON body")
+                        CodeRow(code: "~/Library/Application Support/Loqui/loqui.sock", description: "Connect via NDJSON")
+                        CodeRow(code: "{\"type\":\"raw\",\"text\":\"Hi\"}", description: "Raw PCM request")
                     }
                 }
 
                 helpSection(title: "Local Broker Queue", icon: "arrow.triangle.branch") {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Centralized playback queue endpoint:")
+                        Text("Centralized playback queue command:")
                             .font(.callout)
                             .foregroundColor(.secondary)
-                        CodeRow(code: "TCP 127.0.0.1:18081", description: "Connect via NDJSON")
                         CodeRow(code: "{\"type\":\"speak\",\"text\":\"Hi\"}", description: "Enqueue request")
                         CodeRow(code: "{\"type\":\"stop\"}", description: "Stop and clear queue")
-                        CodeRow(code: "{\"type\":\"health\"}", description: "Check broker status")
+                        CodeRow(code: "{\"type\":\"health\"}", description: "Check status")
                     }
                 }
 
@@ -2364,30 +2531,55 @@ struct AboutView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
+                VStack(spacing: 6) {
+                    Image(nsImage: NSApp.applicationIconImage)
+                        .resizable()
+                        .frame(width: 56, height: 56)
+                    Text("Loqui")
+                        .font(.title3)
+                        .fontWeight(.semibold)
+                    Text("Local voice for any Mac app")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 2)
+
                 VStack(alignment: .leading, spacing: 8) {
                     Text("About")
                         .font(.title2)
                         .fontWeight(.semibold)
-                    Text("We package the pocket-tts binary with the app, which runs a local server that lets any applications (including your coding agent - https://pi.dev!) be send text which Loqui says out loud. We ship a command line utility `ptts` so you can make any application talk via Loqui and we ship a pi extension so the pi agent gets a voice via Loqui.")
-                        .font(.callout)
-                        .foregroundColor(.secondary)
-                }
-
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Credits")
-                        .font(.headline)
-                    Text("Loqui is built on top of the PocketTTS ecosystem. Huge thanks to the original authors.")
+                    Text("Loqui is a macOS menu bar voice server. It runs local PocketTTS synthesis through FluidAudio and exposes Unix socket APIs so command-line tools, coding agents, and custom scripts can speak through one shared app.")
                         .font(.callout)
                         .foregroundColor(.secondary)
                 }
 
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("Pocket TTS")
+                    Text("Included Tools")
                         .font(.headline)
-                    Text("The original model by Kyutai Labs. Fast, compact, and high-quality local TTS.")
+                    Text("Use `loqui` from Terminal, connect to the local socket API, or install the bundled Pi extension for spoken <voice> responses.")
+                        .font(.callout)
+                        .foregroundColor(.secondary)
+                    CodeRow(code: "loqui say \"Hello from Loqui\"", description: "Speak from Terminal")
+                    CodeRow(code: "pi install npm:@swairshah/pi-talk", description: "Voice routing for Pi")
+                }
+                .padding()
+                .background(Color(NSColor.controlBackgroundColor))
+                .cornerRadius(10)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color.secondary.opacity(0.1), lineWidth: 1)
+                )
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Credits")
+                        .font(.headline)
+                    Text("Loqui builds on Kyutai Labs’ PocketTTS model and Fluid Inference’s native Swift/CoreML FluidAudio runtime.")
                         .font(.callout)
                         .foregroundColor(.secondary)
                     Link("github.com/kyutai-labs/pocket-tts", destination: URL(string: "https://github.com/kyutai-labs/pocket-tts")!)
+                        .font(.caption)
+                    Link("github.com/FluidInference/FluidAudio", destination: URL(string: "https://github.com/FluidInference/FluidAudio")!)
                         .font(.caption)
                 }
                 .padding()
@@ -2399,12 +2591,14 @@ struct AboutView: View {
                 )
 
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("pocket-tts (Rust implementation)")
+                    Text("Project Repository")
                         .font(.headline)
-                    Text("Native Rust implementation by babybirdprd used by Loqui under the hood.")
+                    Text("Loqui is maintained at the repository below. Open issues there for bugs, installation problems, or feature requests.")
                         .font(.callout)
                         .foregroundColor(.secondary)
-                    Link("github.com/babybirdprd/pocket-tts", destination: URL(string: "https://github.com/babybirdprd/pocket-tts")!)
+                    Link("github.com/swairshah/Loqui", destination: URL(string: "https://github.com/swairshah/Loqui")!)
+                        .font(.caption)
+                    Link("github.com/swairshah/Loqui/issues", destination: URL(string: "https://github.com/swairshah/Loqui/issues")!)
                         .font(.caption)
                 }
                 .padding()

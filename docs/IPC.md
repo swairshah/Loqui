@@ -1,9 +1,9 @@
-# Loqui IPC Design (Broker)
+# Loqui IPC Design
 
-Loqui exposes a local broker endpoint for centralized queueing and playback:
+Loqui exposes a single local API socket:
 
-- Address: `127.0.0.1:18081`
-- Protocol: NDJSON over TCP (one JSON object per line)
+- Address: `~/Library/Application Support/Loqui/loqui.sock`
+- Protocol: NDJSON over Unix domain socket (one JSON object per line)
 
 ## Commands
 
@@ -32,6 +32,28 @@ Fields:
 {"type":"stop"}
 ```
 
+### voices
+
+```json
+{"type":"voices"}
+```
+
+### raw
+
+Returns raw PCM audio as base64 in `audioBase64`.
+
+```json
+{"type":"raw","text":"Hello","voice":"fantine"}
+```
+
+### generate
+
+Returns WAV audio as base64 in `audioBase64`.
+
+```json
+{"type":"generate","text":"Hello","voice":"fantine"}
+```
+
 ## Response shape
 
 Responses are JSON lines and can include:
@@ -40,6 +62,9 @@ Responses are JSON lines and can include:
 - `pending`
 - `playing`
 - `currentQueue`
+- `voices`
+- `audioBase64`
+- `contentType`
 - `error`
 
 ## Queue model

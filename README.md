@@ -1,67 +1,53 @@
 # <img src="Resources/icons/app-icon.png" width="32" height="32" alt="Loqui icon" style="vertical-align: middle;"> Loqui
 
 Loqui is a TTS server that gives a voice to any application on your Mac.
-instead of every app bundling its own TTS solution we run one local TTS server and any application can talk to it. A CLI tool, a coding agent, a custom script—they all just POST some text to `localhost:18080` and Loqui speaks it. 
+Instead of every app bundling its own TTS solution, Loqui runs one local TTS service and any application can talk to it through a Unix domain socket or the `loqui` CLI.
 
 ## Credits
 
 - **[Pocket TTS](https://github.com/kyutai-labs/pocket-tts)** by Kyutai Labs - The original model. A small (~225MB), fast, high-quality TTS model that runs locally.
-- **[pocket-tts](https://github.com/babybirdprd/pocket-tts)** by babybirdprd - A native Rust port using [Candle](https://github.com/huggingface/candle) for tensor operations. This is what Loqui uses under the hood.
+- **[FluidAudio](https://github.com/FluidInference/FluidAudio)** by Fluid Inference - Native Swift/CoreML PocketTTS inference for Apple platforms. This is what Loqui uses under the hood.
 
-Loqui wraps these into a macOS menubar app with a settings UI, bundles the model weights, and exposes a simple HTTP API that any application can use. It also runs a local broker queue (`127.0.0.1:18081`) for clients that want centralized playback and scheduling. Since we are not using the voice cloning model we don't need the user to sign up for the huggingface access. 
+Loqui wraps these into a macOS menubar app with a settings UI and exposes local Unix socket APIs for direct synthesis and centralized playback. FluidAudio downloads the CoreML PocketTTS assets on first synthesis and caches them locally.
 
 ## Usecase
 
 I wanted to give voice output to [Pi](https://github.com/badlogic/pi-coding-agent) (a coding agent). The assistant writes `<voice>` tags in its responses, and I wanted those spoken aloud. Cloud TTS APIs work but they add latency, cost money per request, and require API keys. Local TTS models exist but setting them up is annoying—you need to download models, set up Python environments, deal with HuggingFace tokens, etc.
 
-Loqui bundles everything into a single macOS app. Install it, and any application on your Mac can use TTS with a simple HTTP call or the `ptts` CLI. The Pi extension is included as an example, but the real point is that Loqui is a general-purpose TTS server for your entire system.
+Loqui bundles everything into a single macOS app. Install it, and any application on your Mac can use TTS with the `loqui` CLI or the local socket protocol. The Pi extension is included as an example, but the real point is that Loqui is a general-purpose TTS service for your entire system.
 
 ## Usage
 
 ### CLI
 
-The `ptts` command lets any application use TTS. By default it enqueues speech into Loqui's local broker queue (centralized playback):
+The `loqui` command lets any application use TTS. By default it enqueues speech into Loqui's local broker queue (centralized playback):
 
 ```bash
-ptts "Hello, world!"
-ptts --voice alba "Good morning!"
-ptts --session-id my-session-123 "Scoped to one session queue"
-echo "Text from a pipe" | ptts
-ptts --list-voices
-ptts --stop
+loqui say "Hello, world!"
+loqui say --voice alba "Good morning!"
+loqui say --session-id my-session-123 "Scoped to one session queue"
+echo "Text from a pipe" | loqui say
+loqui voices
+loqui stop
 ```
 
-### HTTP API
+### Local API
 
-Any application can POST to the server:
+Loqui exposes one Unix domain socket:
 
-```bash
-# Stream audio (pipe to ffplay or any audio player)
-curl -X POST http://127.0.0.1:18080/stream \
-  -H "Content-Type: application/json" \
-  -d '{"text":"Hello world","voice":"fantine"}' | \
-  ffplay -f s16le -ar 24000 -ch_layout mono -nodisp -autoexit -i pipe:0
+- `~/Library/Application Support/Loqui/loqui.sock` - NDJSON API for speech, stop, health, voices, and direct synthesis.
 
-# Generate a WAV file
-curl -X POST http://127.0.0.1:18080/generate \
-  -H "Content-Type: application/json" \
-  -d '{"text":"Hello world","voice":"fantine"}' \
-  --output hello.wav
-```
+### Local Broker Queue (NDJSON over Unix Socket)
 
-Endpoints:
-- `GET /health` - Health check
-- `POST /stream` - Streaming TTS (PCM s16le, 24kHz, mono)
-- `POST /generate` - Generate complete audio (WAV)
-
-### Local Broker Queue (NDJSON over TCP)
-
-For centralized playback, clients connect to `127.0.0.1:18081` and send one JSON object per line.
+For centralized playback, clients connect to `~/Library/Application Support/Loqui/loqui.sock` and send one JSON object per line.
 
 Request examples:
 
 ```json
 {"type":"speak","text":"Hello","voice":"fantine","sourceApp":"pi","sessionId":"session-abc","pid":12345}
+{"type":"raw","text":"Hello","voice":"fantine"}
+{"type":"generate","text":"Hello","voice":"fantine"}
+{"type":"voices"}
 {"type":"health"}
 {"type":"stop"}
 ```
@@ -79,6 +65,9 @@ Response fields (depending on command):
 - `pending`
 - `playing`
 - `currentQueue`
+- `voices`
+- `audioBase64`
+- `contentType`
 - `error`
 
 Queueing behavior:
@@ -119,33 +108,33 @@ Global shortcut: **Cmd+.** stops speech system-wide.
 
 ## Building from Source
 
-Requires Xcode command line tools and Rust.
+Requires macOS 14 or newer and Xcode command line tools.
 
 ```bash
-./build-app.sh
+./scripts/build-app.sh
 ```
 
-The app ends up in `.build/Loqui.app`. The build script compiles the Rust TTS server, the Swift menubar app, and bundles the model weights.
+The app ends up in `.build/Loqui.app`. The build script compiles the Swift menubar app and the `loqui` CLI. FluidAudio downloads PocketTTS CoreML models on first synthesis.
 
 ## Architecture
 
 ```
 ┌─────────────────┐     ┌──────────────────┐     ┌─────────┐
 │  Any App        │────▶│  Loqui.app       │────▶│ Audio   │
-│  (HTTP/CLI)     │     │  (TTS server)    │     │ Output  │
+│  (Socket/CLI)   │     │  (TTS service)   │     │ Output  │
 └─────────────────┘     └──────────────────┘     └─────────┘
 ```
 
-Loqui runs as a menubar app. It starts a local HTTP server on port 18080 and a local broker queue on port 18081.
+Loqui runs as a menubar app. It starts a local Unix socket listener at `~/Library/Application Support/Loqui/loqui.sock`.
 
-- HTTP (`/stream`, `/generate`) is for raw synthesis workflows.
-- Broker (`18081`) is the IPC path for centralized queueing, scheduling, and playback.
+- `speak` is the IPC path for centralized queueing, scheduling, and playback.
+- `raw` and `generate` are for direct audio synthesis workflows.
 
 ## Troubleshooting
 
 **TTS not working?**
 1. Check Loqui is running (speaker icon in menubar)
-2. Test: `curl http://127.0.0.1:18080/health`
+2. Test: `loqui status`
 
 **No audio?**
 1. Check ffplay: `which ffplay`
