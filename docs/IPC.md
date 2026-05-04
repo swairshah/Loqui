@@ -81,10 +81,14 @@ Rules:
 ## Voice assignment behavior
 
 If `voice` is omitted in `speak`:
-- Loqui assigns a stable per-queue default from:
-  - `fantine`, `cosette`, `marius`, `azelma`
-- Loqui tries to keep active queues on distinct voices.
-- If active queues exceed 4, assignment cycles.
+- Loqui assigns a stable per-queue voice from Tier 1 first:
+  - `vera`, `paul`, `charles`, `michael`, `anna`, `fantine`, `eponine`
+- If Tier 1 voices are occupied, Loqui assigns from Tier 2:
+  - `cosette`, `eve`, `george`, `mary`
+- Assignment order is lightly randomized, but a continued app/session keeps its assigned voice.
+- If all automatic voices are occupied, assignment cycles through Tier 1 and Tier 2 again.
+- Reading voices are explicit-only and are not used for automatic assignment:
+  - `caro_davy`, `peter_yearsley`, `stuart_bell`
 
 If `voice` is provided, it is used directly.
 

@@ -17,8 +17,19 @@ NC='\033[0m' # No Color
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 APP_PATH="$PROJECT_ROOT/.build/Loqui.app"
-EXTENSION_SRC="$PROJECT_ROOT/Extensions/pi"
+EXTENSION_SRC="$PROJECT_ROOT/Extensions/pi-talk"
 CLI_SRC="$PROJECT_ROOT/.build/release/loqui-cli"
+CODEX_AGENTS_FILE="$HOME/.codex/AGENTS.md"
+
+CODEX_VOICE_PROMPT="$(cat <<'EOF'
+You have text-to-speech support through PiTalk: any text inside <voice>...</voice> tags will be spoken aloud.
+Use short, natural <voice> summaries when starting work, reaching an important finding, before or after long tool phases, when asking for input, and when finishing.
+Keep spoken text conversational and concise; summarize files, commands, outputs, errors, and code instead of reading them verbatim.
+Do not put Markdown, XML, SSML, code blocks, nested tags, or file dumps inside <voice>; use plain human speech only.
+Text outside <voice> tags is normal Codex output and will not be spoken, so keep detailed technical content outside <voice> tags.
+Avoid excessive narration: speak only when it helps the user follow progress or respond at the right time.
+EOF
+)"
 
 # Check if running from the right directory
 if [ ! -d "$SCRIPT_DIR" ]; then
@@ -27,7 +38,7 @@ if [ ! -d "$SCRIPT_DIR" ]; then
 fi
 
 # Step 1: Check for Homebrew
-echo -e "${CYAN}[1/5]${NC} Checking for Homebrew..."
+echo -e "${CYAN}[1/6]${NC} Checking for Homebrew..."
 if command -v brew &> /dev/null; then
     echo -e "  ${GREEN}✓${NC} Homebrew is installed"
 else
@@ -42,7 +53,7 @@ fi
 
 # Step 2: Install ffmpeg (includes ffplay)
 echo ""
-echo -e "${CYAN}[2/5]${NC} Checking for ffmpeg..."
+echo -e "${CYAN}[2/6]${NC} Checking for ffmpeg..."
 if command -v ffplay &> /dev/null; then
     echo -e "  ${GREEN}✓${NC} ffplay is installed ($(which ffplay))"
 else
@@ -53,7 +64,7 @@ fi
 
 # Step 3: Install Pi extension
 echo ""
-echo -e "${CYAN}[3/5]${NC} Installing Pi extension..."
+echo -e "${CYAN}[3/6]${NC} Installing Pi extension..."
 PI_EXT_DIR="$HOME/.pi/agent/extensions/pi-tts"
 
 if [ -d "$EXTENSION_SRC" ]; then
@@ -65,9 +76,28 @@ else
     echo -e "  ${YELLOW}  You may need to manually install the pi extension${NC}"
 fi
 
-# Step 4: Install Loqui.app
+# Step 4: Configure Codex AGENTS.md
 echo ""
-echo -e "${CYAN}[4/5]${NC} Installing Loqui.app..."
+echo -e "${CYAN}[4/6]${NC} Configuring Codex voice instructions..."
+
+mkdir -p "$(dirname "$CODEX_AGENTS_FILE")"
+touch "$CODEX_AGENTS_FILE"
+
+if grep -Fq "You have text-to-speech support through PiTalk:" "$CODEX_AGENTS_FILE"; then
+    echo -e "  ${GREEN}✓${NC} Codex AGENTS.md already includes PiTalk voice instructions"
+else
+    {
+        if [ -s "$CODEX_AGENTS_FILE" ]; then
+            printf "\n"
+        fi
+        printf "%s\n" "$CODEX_VOICE_PROMPT"
+    } >> "$CODEX_AGENTS_FILE"
+    echo -e "  ${GREEN}✓${NC} Added PiTalk voice instructions to $CODEX_AGENTS_FILE"
+fi
+
+# Step 5: Install Loqui.app
+echo ""
+echo -e "${CYAN}[5/6]${NC} Installing Loqui.app..."
 
 if [ -d "$APP_PATH" ]; then
     INSTALL_DIR="/Applications"
@@ -92,9 +122,9 @@ else
     echo -e "  ${YELLOW}  Run ./scripts/build-app.sh first to build the app${NC}"
 fi
 
-# Step 5: Install loqui CLI
+# Step 6: Install loqui CLI
 echo ""
-echo -e "${CYAN}[5/5]${NC} Installing loqui CLI..."
+echo -e "${CYAN}[6/6]${NC} Installing loqui CLI..."
 
 if [ -f "$CLI_SRC" ]; then
     mkdir -p "$PROJECT_ROOT/bin"

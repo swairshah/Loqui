@@ -76,7 +76,7 @@ See [IPC.md](IPC.md) for the request and response schema.
 
 Broker playback groups requests by `sourceApp + sessionId`. Each queue is FIFO, and Loqui schedules active queues in round-robin order so one client does not monopolize playback.
 
-If a `speak` request omits `voice`, Loqui assigns a stable per-queue voice from its available voices. If the client provides a voice, Loqui uses it directly.
+If a `speak` request omits `voice`, Loqui assigns a stable per-queue voice from the automatic assignment tiers, keeping reading voices explicit-only. If the client provides a voice, Loqui uses it directly.
 
 ## CLI Examples
 

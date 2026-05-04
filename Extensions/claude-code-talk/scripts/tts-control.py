@@ -19,7 +19,7 @@ import sys
 
 LOQUI_SOCKET = os.path.expanduser("~/Library/Application Support/Loqui/loqui.sock")
 STATE_FILE = "/tmp/loqui-tts-state.json"
-AVAILABLE_VOICES = ["auto", "alba", "marius", "javert", "fantine", "cosette", "eponine", "azelma", "vera", "charles", "paul", "caro_davy", "peter_yearsley", "stuart_bell"]
+AVAILABLE_VOICES = ["auto", "alba", "vera", "paul", "charles", "michael", "anna", "fantine", "eponine", "cosette", "eve", "george", "mary", "marius", "javert", "azelma", "caro_davy", "peter_yearsley", "stuart_bell"]
 AVAILABLE_STYLES = ["succinct", "verbose", "chatty"]
 
 

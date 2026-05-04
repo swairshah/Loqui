@@ -1373,11 +1373,17 @@ final class SpeechPlaybackCoordinator {
 
     private var isMicrophoneActive = false
 
-    // Auto voice assignment for queues that don't specify voice.
-    // Note: `alba` is intentionally excluded from auto-rotation.
-    private let autoVoicePool = ["fantine", "cosette", "marius", "azelma"]
+    // Auto voice assignment for queues that don't specify voice. Reading voices
+    // stay explicit-only so clipboard/manual reading keeps its selected voice.
+    private static let autoVoiceTiers = [
+        ["vera", "paul", "charles", "michael", "anna", "fantine", "eponine"],
+        ["cosette", "eve", "george", "mary"]
+    ]
     private var autoVoiceByQueueKey: [String: String] = [:]
-    private var autoVoiceCycleIndex = 0
+    private var autoVoiceTierOrders = SpeechPlaybackCoordinator.autoVoiceTiers.map { $0.shuffled() }
+    private var autoVoiceTierIndices = Array(repeating: 0, count: SpeechPlaybackCoordinator.autoVoiceTiers.count)
+    private var autoVoiceReuseOrder = SpeechPlaybackCoordinator.autoVoiceTiers.flatMap { $0 }.shuffled()
+    private var autoVoiceReuseIndex = 0
 
     private let engine: FluidPocketTTSEngine
     private let defaultVoiceProvider: () -> String
@@ -1649,24 +1655,49 @@ final class SpeechPlaybackCoordinator {
             return assigned
         }
 
-        // Check all already-assigned voices, not just active queues.
-        // This ensures different sessions get different voices even if they're
-        // not concurrent (e.g., session A finishes before session B starts).
-        let usedVoices = Set(autoVoiceByQueueKey.values)
+        // Check all already-assigned voices, not just active queues, so a
+        // continued app/session keeps its voice and newer sessions spread out.
+        let occupiedVoices = Set(autoVoiceByQueueKey.values)
 
-        if let freeVoice = autoVoicePool.first(where: { !usedVoices.contains($0) }) {
-            autoVoiceByQueueKey[queueKey] = freeVoice
-            return freeVoice
+        for tierIndex in Self.autoVoiceTiers.indices {
+            if let voice = nextAvailableAutoVoiceLocked(in: tierIndex, excluding: occupiedVoices) {
+                autoVoiceByQueueKey[queueKey] = voice
+                return voice
+            }
         }
 
-        guard !autoVoicePool.isEmpty else {
-            return defaultVoiceProvider()
+        if let voice = nextReuseAutoVoiceLocked() {
+            autoVoiceByQueueKey[queueKey] = voice
+            return voice
         }
 
-        let cycled = autoVoicePool[autoVoiceCycleIndex % autoVoicePool.count]
-        autoVoiceCycleIndex += 1
-        autoVoiceByQueueKey[queueKey] = cycled
-        return cycled
+        return defaultVoiceProvider()
+    }
+
+    private func nextAvailableAutoVoiceLocked(in tierIndex: Int, excluding occupiedVoices: Set<String>) -> String? {
+        guard autoVoiceTierOrders.indices.contains(tierIndex) else { return nil }
+        let tier = autoVoiceTierOrders[tierIndex]
+        guard !tier.isEmpty else { return nil }
+
+        for _ in 0..<tier.count {
+            let index = autoVoiceTierIndices[tierIndex] % tier.count
+            autoVoiceTierIndices[tierIndex] += 1
+
+            let voice = tier[index]
+            if !occupiedVoices.contains(voice) {
+                return voice
+            }
+        }
+
+        return nil
+    }
+
+    private func nextReuseAutoVoiceLocked() -> String? {
+        guard !autoVoiceReuseOrder.isEmpty else { return nil }
+
+        let index = autoVoiceReuseIndex % autoVoiceReuseOrder.count
+        autoVoiceReuseIndex += 1
+        return autoVoiceReuseOrder[index]
     }
 
     private func queueKey(sourceApp: String?, sessionId: String?) -> String {
@@ -2040,7 +2071,7 @@ struct GeneralSettingsView: View {
     @State private var isPreviewPlaying = false
     
     // All available voices from kyutai/pocket-tts
-    let availableVoices = ["alba", "marius", "javert", "fantine", "cosette", "eponine", "azelma", "vera", "charles", "paul", "caro_davy", "peter_yearsley", "stuart_bell"]
+    let availableVoices = TTSClient.availableVoices
     
     var body: some View {
         Form {

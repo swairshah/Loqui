@@ -48,7 +48,7 @@ claude --plugin-dir ./Extensions/claude-code-talk
 
 ### Available voices
 
-`auto` (default), `alba`, `marius`, `javert`, `fantine`, `cosette`, `eponine`, `azelma`, `vera`, `charles`, `paul`, `caro_davy`, `peter_yearsley`, `stuart_bell`
+`auto` (default), `alba`, `vera`, `paul`, `charles`, `michael`, `anna`, `fantine`, `eponine`, `cosette`, `eve`, `george`, `mary`, `marius`, `javert`, `azelma`, `caro_davy`, `peter_yearsley`, `stuart_bell`
 
 ## Architecture
 
