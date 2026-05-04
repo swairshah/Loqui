@@ -33,7 +33,7 @@ def load_state():
         with open(STATE_FILE, "r") as f:
             return json.load(f)
     except Exception:
-        return {"enabled": True, "voice": "auto"}
+        return {"enabled": True, "voice": "vera"}
 
 
 def load_spoken():

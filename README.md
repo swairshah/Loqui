@@ -36,7 +36,7 @@ loqui stop
 
 Available voices:
 
-`fantine`, `alba`, `marius`, `cosette`, `eponine`, `azelma`, `javert`
+`fantine`, `alba`, `marius`, `cosette`, `eponine`, `azelma`, `javert`, `vera`, `charles`, `paul`, `caro_davy`, `peter_yearsley`, `stuart_bell`
 
 You can also change the default voice in Loqui's menu bar settings.
 

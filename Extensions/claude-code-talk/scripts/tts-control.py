@@ -19,7 +19,7 @@ import sys
 
 LOQUI_SOCKET = os.path.expanduser("~/Library/Application Support/Loqui/loqui.sock")
 STATE_FILE = "/tmp/loqui-tts-state.json"
-AVAILABLE_VOICES = ["auto", "alba", "marius", "javert", "fantine", "cosette", "eponine", "azelma"]
+AVAILABLE_VOICES = ["auto", "alba", "marius", "javert", "fantine", "cosette", "eponine", "azelma", "vera", "charles", "paul", "caro_davy", "peter_yearsley", "stuart_bell"]
 AVAILABLE_STYLES = ["succinct", "verbose", "chatty"]
 
 
@@ -28,7 +28,7 @@ def load_state():
         with open(STATE_FILE, "r") as f:
             return json.load(f)
     except Exception:
-        return {"enabled": True, "voice": "auto"}
+        return {"enabled": True, "voice": "vera"}
 
 
 def save_state(state):

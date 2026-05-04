@@ -32,7 +32,7 @@ const INBOX_BASE_DIR = path.join(os.homedir(), ".pi", "agent", "pitalk-inbox");
 // Configuration - matches Loqui defaults
 const LOQUI_APP_SUPPORT = path.join(os.homedir(), "Library", "Application Support", "Loqui");
 const LOQUI_SOCKET = path.join(LOQUI_APP_SUPPORT, "loqui.sock");
-const AVAILABLE_VOICES = ["auto", "alba", "marius", "javert", "fantine", "cosette", "eponine", "azelma"];
+const AVAILABLE_VOICES = ["auto", "alba", "marius", "javert", "fantine", "cosette", "eponine", "azelma", "vera", "charles", "paul", "caro_davy", "peter_yearsley", "stuart_bell"];
 
 // System prompt injection for voice tags - succinct style
 const VOICE_PROMPT_SUCCINCT = `

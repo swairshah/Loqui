@@ -1,5 +1,5 @@
 ---
-description: "Change Claude Talk voice (auto, alba, marius, javert, fantine, cosette, eponine, azelma)"
+description: "Change Claude Talk voice (auto, alba, marius, javert, fantine, cosette, eponine, azelma, vera, charles, paul, caro_davy, peter_yearsley, stuart_bell)"
 argument-hint: "[voice-name]"
 allowed-tools: ["Bash"]
 ---

@@ -37,7 +37,7 @@ Once installed, Pi will automatically speak `<voice>` tagged content in its resp
 |---------|-------------|
 | `/tts` | Toggle TTS on/off |
 | `/tts-mute` | Mute audio (keeps voice tags in responses) |
-| `/tts-voice <name>` | Change voice (alba, marius, javert, fantine, cosette, eponine, azelma) |
+| `/tts-voice <name>` | Change voice (alba, marius, javert, fantine, cosette, eponine, azelma, vera, charles, paul, caro_davy, peter_yearsley, stuart_bell) |
 | `/tts-style` | Toggle between succinct and verbose voice prompts |
 | `/tts-say <text>` | Speak arbitrary text |
 | `/tts-stop` | Stop current speech |

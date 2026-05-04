@@ -68,7 +68,7 @@ public class TTSClient {
     }
 
     /// Available voices
-    public static let availableVoices = ["alba", "marius", "javert", "fantine", "cosette", "eponine", "azelma"]
+    public static let availableVoices = ["alba", "marius", "javert", "fantine", "cosette", "eponine", "azelma", "vera", "charles", "paul", "caro_davy", "peter_yearsley", "stuart_bell"]
 
     /// Check if server is running
     public func healthCheck() async throws -> Bool {

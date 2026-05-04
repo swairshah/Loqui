@@ -2010,7 +2010,7 @@ struct GeneralSettingsView: View {
     @State private var isPreviewPlaying = false
     
     // All available voices from kyutai/pocket-tts
-    let availableVoices = ["alba", "marius", "javert", "fantine", "cosette", "eponine", "azelma"]
+    let availableVoices = ["alba", "marius", "javert", "fantine", "cosette", "eponine", "azelma", "vera", "charles", "paul", "caro_davy", "peter_yearsley", "stuart_bell"]
     
     var body: some View {
         Form {
