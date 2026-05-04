@@ -1,144 +1,126 @@
 # <img src="Resources/icons/app-icon.png" width="32" height="32" alt="Loqui icon" style="vertical-align: middle;"> Loqui
 
-Loqui is a TTS server that gives a voice to any application on your Mac.
-Instead of every app bundling its own TTS solution, Loqui runs one local TTS service and any application can talk to it through a Unix domain socket or the `loqui` CLI.
+Loqui gives your Mac a local voice service. Keep Loqui running in the menu bar, then use it from Terminal, Pi, Claude Code, or any app that knows how to send text to Loqui.
 
-## Credits
+Loqui runs on-device using PocketTTS through FluidAudio, so speech does not require cloud TTS APIs, API keys, or per-request fees. The first speech request may take longer while model assets are downloaded and cached locally.
 
-- **[Pocket TTS](https://github.com/kyutai-labs/pocket-tts)** by Kyutai Labs - The original model. A small (~225MB), fast, high-quality TTS model that runs locally.
-- **[FluidAudio](https://github.com/FluidInference/FluidAudio)** by Fluid Inference - Native Swift/CoreML PocketTTS inference for Apple platforms. This is what Loqui uses under the hood.
+## Requirements
 
-Loqui wraps these into a macOS menubar app with a settings UI and exposes local Unix socket APIs for direct synthesis and centralized playback. FluidAudio downloads the CoreML PocketTTS assets on first synthesis and caches them locally.
+- macOS 14 or newer
+- Apple Silicon Mac recommended
+- Homebrew for the easiest install
 
-## Usecase
+## Install Loqui
 
-I wanted to give voice output to [Pi](https://github.com/badlogic/pi-coding-agent) (a coding agent). The assistant writes `<voice>` tags in its responses, and I wanted those spoken aloud. Cloud TTS APIs work but they add latency, cost money per request, and require API keys. Local TTS models exist but setting them up is annoying—you need to download models, set up Python environments, deal with HuggingFace tokens, etc.
+```bash
+brew install swairshah/tap/loqui
+```
 
-Loqui bundles everything into a single macOS app. Install it, and any application on your Mac can use TTS with the `loqui` CLI or the local socket protocol. The Pi extension is included as an example, but the real point is that Loqui is a general-purpose TTS service for your entire system.
+Then open **Loqui** from Applications. It runs as a menu bar app.
 
-## Usage
+To confirm it is running:
 
-### CLI
+```bash
+loqui status
+```
 
-The `loqui` command lets any application use TTS. By default it enqueues speech into Loqui's local broker queue (centralized playback):
+## Speak from Terminal
 
 ```bash
 loqui say "Hello, world!"
 loqui say --voice alba "Good morning!"
-loqui say --session-id my-session-123 "Scoped to one session queue"
 echo "Text from a pipe" | loqui say
 loqui voices
 loqui stop
 ```
 
-### Local API
+Available voices:
 
-Loqui exposes one Unix domain socket:
+`fantine`, `alba`, `marius`, `cosette`, `eponine`, `azelma`, `javert`
 
-- `~/Library/Application Support/Loqui/loqui.sock` - NDJSON API for speech, stop, health, voices, and direct synthesis.
+You can also change the default voice in Loqui's menu bar settings.
 
-### Local Broker Queue (NDJSON over Unix Socket)
+## Use with Pi
 
-For centralized playback, clients connect to `~/Library/Application Support/Loqui/loqui.sock` and send one JSON object per line.
-
-Request examples:
-
-```json
-{"type":"speak","text":"Hello","voice":"fantine","sourceApp":"pi","sessionId":"session-abc","pid":12345}
-{"type":"raw","text":"Hello","voice":"fantine"}
-{"type":"generate","text":"Hello","voice":"fantine"}
-{"type":"voices"}
-{"type":"health"}
-{"type":"stop"}
-```
-
-`type: "speak"` fields:
-- `text` (required)
-- `voice` (optional)
-- `sourceApp` (optional)
-- `sessionId` (optional)
-- `pid` (optional)
-
-Response fields (depending on command):
-- `ok`
-- `queued`
-- `pending`
-- `playing`
-- `currentQueue`
-- `voices`
-- `audioBase64`
-- `contentType`
-- `error`
-
-Queueing behavior:
-- Requests are grouped by queue key: `sourceApp + sessionId`
-- Missing session IDs are grouped into one shared session bucket
-- Scheduler processes queues fairly in round-robin order
-- If `voice` is omitted, Loqui auto-assigns per-queue voices from:
-  - `fantine`, `alba`, `cosette`, `marius`, `azelma`
-  - If more than 5 active queues, assignment cycles
-
-Detailed IPC notes: `docs/IPC.md`
-
-### Voices
-
-Seven voices are available: `fantine` (default), `alba`, `marius`, `cosette`, `eponine`, `azelma`, `javert`. You can change the default voice in the menubar settings.
-
-### Microphone-aware playback
-
-Loqui is microphone-aware when using broker playback:
-- If the microphone becomes active while Loqui is speaking, current playback is interrupted and already-queued items are cancelled.
-- If the microphone is already active before playback starts, queued items wait and resume after microphone activity ends.
-
-### With Pi
-
-The bundled Pi extension intercepts `<voice>` tags from the assistant and enqueues them to Loqui's local broker for centralized playback. It sends `sourceApp`, `sessionId`, and `pid` metadata so Loqui can isolate per-session queues:
-
-```
-<voice>Found the bug. It was an off-by-one error in the loop.</voice>
-```
-
-Commands in Pi:
-- `/tts` - Toggle TTS on/off
-- `/tts-mute` - Mute audio (keeps voice tags in responses)
-- `/tts-say <text>` - Speak arbitrary text
-- `/tts-stop` - Stop current speech
-
-Global shortcut: **Cmd+.** stops speech system-wide.
-
-## Building from Source
-
-Requires macOS 14 or newer and Xcode command line tools.
+Install the Pi extension:
 
 ```bash
-./scripts/build-app.sh
+pi install npm:@swairshah/pi-talk
 ```
 
-The app ends up in `.build/Loqui.app`. The build script compiles the Swift menubar app and the `loqui` CLI. FluidAudio downloads PocketTTS CoreML models on first synthesis.
+Restart Pi if needed. Once installed, Pi can speak short `<voice>` summaries from assistant responses through Loqui.
 
-## Architecture
+Pi commands:
 
+| Command | Description |
+| --- | --- |
+| `/tts` | Toggle TTS on or off |
+| `/tts-mute` | Mute audio while keeping voice tags |
+| `/tts-voice <name>` | Change voice |
+| `/tts-style` | Toggle succinct or verbose voice prompts |
+| `/tts-say <text>` | Speak text manually |
+| `/tts-stop` | Stop current speech |
+| `/tts-status` | Show TTS status |
+
+## Use with Claude Code
+
+Loqui also includes a Claude Code plugin in `Extensions/claude-code-talk`.
+
+From this repository:
+
+```bash
+claude plugin install ./Extensions/claude-code-talk
 ```
-┌─────────────────┐     ┌──────────────────┐     ┌─────────┐
-│  Any App        │────▶│  Loqui.app       │────▶│ Audio   │
-│  (Socket/CLI)   │     │  (TTS service)   │     │ Output  │
-└─────────────────┘     └──────────────────┘     └─────────┘
+
+Claude Code speaks after each response completes because Claude Code hooks run after the full assistant message is available.
+
+## Stop Speech
+
+Use any of these:
+
+```bash
+loqui stop
 ```
 
-Loqui runs as a menubar app. It starts a local Unix socket listener at `~/Library/Application Support/Loqui/loqui.sock`.
+- Press **Cmd+.** anywhere on macOS.
+- Click stop in the Loqui menu bar app.
+- Use `/tts-stop` in Pi or `/claude-talk:tts-stop` in Claude Code.
 
-- `speak` is the IPC path for centralized queueing, scheduling, and native streaming playback.
-- `raw` and `generate` are for direct audio synthesis workflows.
+## Microphone-Aware Playback
+
+Loqui watches whether the default microphone is active. If your microphone becomes active while Loqui is speaking, current speech stops and queued speech is cleared. If the microphone is already active, queued speech waits until microphone activity ends.
+
+Loqui detects microphone activity through CoreAudio device state; it does not capture microphone audio.
 
 ## Troubleshooting
 
-**TTS not working?**
-1. Check Loqui is running (speaker icon in menubar)
-2. Test: `loqui status`
+**Loqui is not speaking**
 
-**No audio?**
-1. Check the macOS output device and volume.
-2. Try the built-in preview button in Loqui settings.
+1. Check that Loqui is running in the menu bar.
+2. Run `loqui status`.
+3. Try `loqui say "Testing Loqui"`.
+4. Check your macOS output device and volume.
+
+**The first request is slow**
+
+The model may still be downloading and caching. Try again after the first synthesis finishes.
+
+**Pi or Claude Code is not speaking**
+
+1. Make sure Loqui is running.
+2. Test `loqui say "Testing"` from Terminal.
+3. Check the extension status command: `/tts-status` in Pi or `/claude-talk:tts-status` in Claude Code.
+
+## Developer Docs
+
+- [Developer guide](docs/DEVELOPMENT.md)
+- [IPC protocol](docs/IPC.md)
+- [Release process](docs/RELEASE.md)
+
+## Credits
+
+- [Pocket TTS](https://github.com/kyutai-labs/pocket-tts) by Kyutai Labs
+- [FluidAudio](https://github.com/FluidInference/FluidAudio) by Fluid Inference
 
 ## License
 
