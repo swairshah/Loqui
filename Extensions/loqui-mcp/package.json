@@ -1,0 +1,36 @@
+{
+  "name": "@swairshah/loqui-mcp",
+  "version": "0.1.0",
+  "description": "MCP server and CLI bridge for the Loqui local TTS service",
+  "type": "module",
+  "bin": {
+    "loqui-mcp": "./src/index.js"
+  },
+  "scripts": {
+    "test:mcp": "node examples/test-mcp-client.js status"
+  },
+  "files": [
+    "examples/*.js",
+    "examples/*.py",
+    "src",
+    "README.md"
+  ],
+  "keywords": [
+    "mcp",
+    "tts",
+    "text-to-speech",
+    "loqui",
+    "voice"
+  ],
+  "author": "Swair Shah",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/swairshah/Loqui.git",
+    "directory": "Extensions/loqui-mcp"
+  },
+  "homepage": "https://github.com/swairshah/Loqui#readme",
+  "engines": {
+    "node": ">=18"
+  }
+}

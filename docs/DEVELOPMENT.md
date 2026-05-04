@@ -40,6 +40,7 @@ Sources/LoquiCLI/       command-line client
 Sources/LoquiClient/    shared Swift socket client
 Extensions/pi-talk/     Pi extension
 Extensions/claude-code-talk/
+Extensions/loqui-mcp/   MCP server package for agent tools
 docs/IPC.md             local socket protocol
 docs/RELEASE.md         release workflow
 scripts/build-app.sh    local app build
@@ -96,6 +97,8 @@ loqui stop
 The Pi extension extracts `<voice>` tagged content from assistant responses and sends it to Loqui with `sourceApp`, `sessionId`, and `pid` metadata.
 
 The Claude Code plugin also extracts `<voice>` content, but Claude Code hooks only run after the full response completes. Speech therefore starts after each response rather than streaming while Claude writes.
+
+The MCP package exposes explicit Loqui tools over stdio. It is useful for broad compatibility across MCP-capable agents, but it does not automatically inspect assistant output; automatic narration remains the job of app-specific hooks/extensions.
 
 ## Releases
 

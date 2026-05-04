@@ -63,3 +63,6 @@ releases/
 
 # Distribution artifacts
 dist/
+
+# JavaScript packages
+node_modules/

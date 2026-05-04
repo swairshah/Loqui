@@ -86,6 +86,17 @@ git push
 The script only creates `dist/pi-talk-<version>.zip`.
 Publishing `@swairshah/pi-talk` to npm is a separate step and can be done later.
 
+## MCP package (npm)
+
+Publishing `@swairshah/loqui-mcp` is also separate from the app release script:
+
+```bash
+cd Extensions/loqui-mcp
+npm publish --access public
+```
+
+The package is dependency-free and runs directly from `src/index.js`.
+
 ---
 
 ## Post-install notes for users

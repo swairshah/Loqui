@@ -74,6 +74,20 @@ claude plugin install ./Extensions/claude-code-talk
 
 Claude Code speaks after each response completes because Claude Code hooks run after the full assistant message is available.
 
+## Use with MCP-Capable Agents
+
+Loqui includes an MCP server package in `Extensions/loqui-mcp`. It gives MCP clients tools for speaking text, stopping playback, checking status, listing voices, and saving WAV audio.
+
+Auto-install it to detected agents:
+
+```bash
+npx -y @swairshah/loqui-mcp@latest mcp --install
+```
+
+This registers Loqui with Claude Code, Codex, Cursor, Windsurf, OpenCode, and Pi when their CLIs/config directories are present.
+
+MCP gives agents explicit tools. Automatic spoken summaries from every assistant response still need an app-specific hook or extension, such as the bundled Pi and Claude Code integrations.
+
 ## Stop Speech
 
 Use any of these:
