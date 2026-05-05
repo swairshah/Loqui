@@ -66,3 +66,7 @@ dist/
 
 # JavaScript packages
 node_modules/
+
+# Local extension sandboxes
+Extensions/.local/
+Extensions/codex-talk/.state/

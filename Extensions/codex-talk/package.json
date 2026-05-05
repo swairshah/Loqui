@@ -1,0 +1,13 @@
+{
+  "name": "@swairshah/loqui-codex-talk",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Repo-local Codex hooks that speak <voice> tagged output through Loqui",
+  "scripts": {
+    "prepare-local-home": "node ./scripts/prepare-local-home.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

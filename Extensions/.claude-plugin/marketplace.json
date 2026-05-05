@@ -1,7 +1,5 @@
 {
   "name": "loqui-plugins",
-  "version": "1.0.0",
-  "description": "TTS plugins for coding agents",
   "owner": {
     "name": "Swair Shah"
   },

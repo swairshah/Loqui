@@ -1,0 +1,29 @@
+{
+  "name": "codex-talk",
+  "version": "0.1.0",
+  "description": "Local Codex hooks that speak <voice> tagged assistant output through Loqui.",
+  "author": {
+    "name": "Swair Shah"
+  },
+  "homepage": "https://github.com/swairshah/Loqui",
+  "repository": "https://github.com/swairshah/Loqui",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "hooks",
+    "tts",
+    "loqui",
+    "voice"
+  ],
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "Codex Talk",
+    "shortDescription": "Speak Codex voice tags through Loqui",
+    "longDescription": "Adds Codex lifecycle hooks that extract <voice> tagged assistant text from transcripts and send it to the local Loqui app.",
+    "developerName": "Swair Shah",
+    "category": "Productivity",
+    "capabilities": [
+      "Read"
+    ]
+  }
+}
