@@ -26,9 +26,12 @@ AVAILABLE_STYLES = ["succinct", "verbose", "chatty"]
 def load_state():
     try:
         with open(STATE_FILE, "r") as f:
-            return json.load(f)
+            state = json.load(f)
     except Exception:
-        return {"enabled": True, "voice": "vera"}
+        state = {"enabled": True, "voice": "auto"}
+    if state.get("voice") == "vera" and not state.get("voice_explicit"):
+        state["voice"] = "auto"
+    return state
 
 
 def save_state(state):
@@ -126,6 +129,7 @@ def main():
             print(f"Available: {', '.join(AVAILABLE_VOICES)}")
             sys.exit(1)
         state["voice"] = voice
+        state["voice_explicit"] = voice != "auto"
         save_state(state)
         print(f"Voice changed to: {voice}")
 
@@ -146,7 +150,7 @@ def main():
                 sys.exit(1)
         state["style"] = new_style
         save_state(state)
-        print(f"Style changed to: {new_style}. Restart session for new prompt to take effect.")
+        print(f"Style changed to: {new_style}. Takes effect on your next message.")
 
     else:
         print(f"Unknown action: {action}")

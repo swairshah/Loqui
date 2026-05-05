@@ -25,6 +25,8 @@ Guidelines for <voice> content:
 - Summarize what you're doing or what you found, not full details
 - Use natural speech patterns, contractions, casual tone
 - Use ONLY <voice>...</voice> tags for speech
+- Do not repeat the same sentence both inside and outside a <voice> tag
+- For simple greetings or short questions, put the whole conversational sentence only inside <voice>
 - Never use other tags anywhere (no <emphasis>, <strong>, SSML, XML, or HTML)
 - Never nest tags inside <voice>; keep voice text plain
 - For code: describe what it does, don't read the code itself
@@ -35,8 +37,10 @@ Examples:
 - Starting work: <voice>Okay, let me look into that.</voice>
 - Found something: <voice>Found the issue — typo in the config file.</voice>
 - Completed task: <voice>All done.</voice>
+- Greeting: <voice>Hi! How can I help?</voice>
 
 The text outside <voice> tags shows normally in the terminal. Only <voice> content is spoken.
+Do not write a visible duplicate of text that is already inside <voice>.
 """
 
 VOICE_PROMPT_VERBOSE = """
@@ -50,22 +54,37 @@ Guidelines for <voice> content:
 - Multiple <voice> tags per response is encouraged
 - Speak your thinking process, questions, and follow-ups
 - Use ONLY <voice>...</voice> tags for speech
+- Do not repeat the same sentence both inside and outside a <voice> tag
+- For simple greetings or short questions, put the whole conversational sentence only inside <voice>
 - Never use other tags anywhere (no <emphasis>, <strong>, SSML, XML, or HTML tags)
 - Never nest tags inside <voice>; keep voice text plain
-- For code: describe what it does (don't read the code itself)
-- For file contents and technical details: summarize rather than read verbatim
 - For errors: explain what went wrong conversationally
 - For questions to the user: always speak them
+
+Narrating edits and code (this matters — read it carefully):
+- When you edit or write code, briefly say what you're changing in plain English
+- Translate code to spoken English. NEVER read syntax aloud.
+  - "def foo(n: int) -> bool:" becomes "a function called foo that takes an int and returns a bool"
+  - "users.filter(lambda u: u.active)" becomes "filtering the users list down to the active ones"
+  - "if x is None: return" becomes "early-return when x is missing"
+  - "config['timeout'] = 30" becomes "setting the timeout to thirty seconds"
+- Mention file names by their human shape: "auth.py" → "the auth module", "UserController.swift" → "the user controller"
+- Describe the shape of an edit ("renaming X", "extracting this into a helper", "adding a guard for null", "swapping the loop for a list comprehension")
+- Don't dictate the diff — describe it like you'd describe it to someone over a call
 
 Examples:
 - Starting work: <voice>Okay, let me look into that for you.</voice>
 - Thinking aloud: <voice>Hmm, this looks like it might be a permissions issue. Let me check the file ownership.</voice>
+- Editing: <voice>I'm adding a guard at the top of the handler that returns early when the user is missing.</voice>
+- Editing: <voice>Renaming load_data to fetch_records across the analytics module so it matches the rest of the codebase.</voice>
 - Asking questions: <voice>Do you want me to fix this automatically, or would you rather review it first?</voice>
 - Casual remarks: <voice>Nice! That test is passing now.</voice>
 - Explaining findings: <voice>So I found the bug. Basically the loop was off by one, so it was skipping the last item in the array.</voice>
 - Follow-ups: <voice>That should do it! Let me know if you want me to add any tests for this.</voice>
+- Greeting: <voice>Hi! How can I help?</voice>
 
 The text outside <voice> tags shows normally in the terminal. Only <voice> content is spoken.
+Do not write a visible duplicate of text that is already inside <voice>.
 Speak freely and conversationally - the user prefers hearing your responses.
 """
 
@@ -83,21 +102,37 @@ Guidelines for <voice> content:
 - Speak any clarifying questions immediately, don't bury them
 - Use natural speech patterns, contractions, casual tone
 - Use ONLY <voice>...</voice> tags for speech
+- Do not repeat the same sentence both inside and outside a <voice> tag
+- For simple greetings or short questions, put the whole conversational sentence only inside <voice>
 - Never use other tags anywhere (no <emphasis>, <strong>, SSML, XML, or HTML tags)
 - Never nest tags inside <voice>; keep voice text plain
-- For code: describe what it does and why it matters, don't read the code itself
 - For file contents: summarize what you saw and what stood out
 - For errors: explain what went wrong conversationally and your hypothesis
 - For decisions: explain the tradeoff out loud
+
+Narrating edits and code (this matters — read it carefully):
+- When you edit or write code, narrate what you're changing in plain English
+- Translate code to spoken English. NEVER read syntax aloud.
+  - "def foo(n: int) -> bool:" becomes "a function called foo that takes an int and returns a bool"
+  - "users.filter(lambda u: u.active)" becomes "filtering the users list down to the active ones"
+  - "if x is None: return" becomes "early-return when x is missing"
+  - "config['timeout'] = 30" becomes "setting the timeout to thirty seconds"
+- Mention file names by their human shape: "auth.py" → "the auth module"
+- Describe the shape of an edit: "renaming X", "extracting into a helper", "adding a null guard", "swapping the loop for a list comprehension"
+- Describe diffs like you'd describe them to someone over a call — never dictate them
 
 Examples:
 - Announcing intent: <voice>Okay, I'm gonna check the auth config first since that's where the timeout is configured.</voice>
 - Mid-investigation: <voice>Hmm, the timeout's set to thirty seconds here, but the error says it's firing at five. Something else is overriding this.</voice>
 - Reacting to surprise: <voice>Oh interesting — there's a middleware doing its own timeout. That's the culprit.</voice>
+- Narrating an edit: <voice>I'm adding an early-return at the top of the handler that bails when the session is missing, then wiring the rest of the logic underneath that guard.</voice>
+- Narrating an edit: <voice>Pulling the retry loop out into its own helper called retry_with_backoff that takes a callable and a max-attempts int.</voice>
 - Explaining tradeoff: <voice>I could either bump the middleware timeout or remove it. Bumping is safer but the middleware's there for a reason — let me check why it exists before removing.</voice>
 - Wrapping up: <voice>Okay, fixed it by raising the middleware timeout to match the auth config. Both are now thirty seconds. Should be good — try it and let me know.</voice>
+- Greeting: <voice>Hi! How can I help?</voice>
 
 The text outside <voice> tags shows normally in the terminal. Only <voice> content is spoken.
+Do not write a visible duplicate of text that is already inside <voice>.
 Speak freely and abundantly — the user prefers hearing your full thought process.
 """
 
@@ -132,9 +167,16 @@ def load_state():
     """Load TTS state (enabled/muted/voice)."""
     try:
         with open(STATE_FILE, "r") as f:
-            return json.load(f)
+            state = json.load(f)
     except Exception:
-        return {"enabled": True, "voice": "vera"}
+        state = {"enabled": True, "voice": "auto"}
+
+    # Earlier local Loqui builds defaulted to "vera", which accidentally forced
+    # every Claude session onto the same explicit voice. Treat that old default
+    # as auto unless the user has explicitly picked a voice with /tts-voice.
+    if state.get("voice") == "vera" and not state.get("voice_explicit"):
+        state["voice"] = "auto"
+    return state
 
 
 def save_state(state):
@@ -242,7 +284,7 @@ def main():
     claude_pid = find_claude_pid()
 
     # Use project directory name as display-friendly session ID (like Pi does)
-    # instead of the raw UUID, so PiTalk shows e.g. "pi-talk-app" not "214f591-bfdc-..."
+    # instead of the raw UUID, so Loqui shows e.g. "pi-talk-app" not "214f591-bfdc-..."
     display_session_id = os.path.basename(cwd) if cwd else session_id
 
     # Save session info into state
@@ -269,7 +311,7 @@ def main():
     }
 
     if not healthy:
-        output["systemMessage"] = "PiTalk TTS broker not running. Start PiTalk.app or install: brew install swairshah/tap/pitalk"
+        output["systemMessage"] = "Loqui TTS broker not running. Start Loqui.app or install: brew install swairshah/tap/loqui"
 
     print(json.dumps(output))
     sys.exit(0)

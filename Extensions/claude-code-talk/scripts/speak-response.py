@@ -16,8 +16,9 @@ LOQUI_SOCKET = os.path.expanduser("~/Library/Application Support/Loqui/loqui.soc
 STATE_FILE = "/tmp/loqui-tts-state.json"
 DEBUG_LOG = "/tmp/loqui-tts-debug.log"
 
-# Track what we've already spoken to avoid re-speaking on resume/compact
-SPOKEN_FILE = "/tmp/loqui-tts-spoken.json"
+# Per-message dedup. Shared with flush-voice.py (PreToolUse hook) so we don't
+# re-speak chunks that already played mid-turn. Format: {msg_uuid: chunks_spoken}.
+FLUSH_FILE = "/tmp/loqui-tts-flushed.json"
 
 
 def debug(msg):
@@ -28,27 +29,44 @@ def debug(msg):
         pass
 
 
+def derive_session_id(input_data):
+    """Display-friendly, per-session sessionId: "<cwd-basename>-<uuid[:8]>".
+
+    Must stay identical to the derivation in style-reminder.py and
+    flush-voice.py so drains line up with enqueues.
+    """
+    raw = input_data.get("session_id", "") or ""
+    cwd = input_data.get("cwd", "") or ""
+    base = os.path.basename(cwd) if cwd else ""
+    if base and raw:
+        return f"{base}-{raw[:8]}"
+    return base or raw or "unknown"
+
+
 def load_state():
     try:
         with open(STATE_FILE, "r") as f:
+            state = json.load(f)
+    except Exception:
+        state = {"enabled": True, "voice": "auto"}
+    if state.get("voice") == "vera" and not state.get("voice_explicit"):
+        state["voice"] = "auto"
+    return state
+
+
+def load_flushed():
+    """Return {msg_uuid: chunk_count_already_spoken}."""
+    try:
+        with open(FLUSH_FILE, "r") as f:
             return json.load(f)
     except Exception:
-        return {"enabled": True, "voice": "vera"}
+        return {}
 
 
-def load_spoken():
-    """Load set of already-spoken message UUIDs."""
+def save_flushed(d):
     try:
-        with open(SPOKEN_FILE, "r") as f:
-            return set(json.load(f))
-    except Exception:
-        return set()
-
-
-def save_spoken(spoken):
-    try:
-        with open(SPOKEN_FILE, "w") as f:
-            json.dump(list(spoken), f)
+        with open(FLUSH_FILE, "w") as f:
+            json.dump(d, f)
     except Exception:
         pass
 
@@ -148,23 +166,24 @@ def main():
         debug("stop_hook_active=True, skipping")
         sys.exit(0)
 
-    session_id = state.get("session_id", input_data.get("session_id", "unknown"))
+    # Per-session sessionId from hook input (not state, which is shared and
+    # gets stomped on every session-start).
+    session_id = derive_session_id(input_data)
     voice = state.get("voice", "auto")
     pid = state.get("claude_pid", os.getpid())
     transcript_path = input_data.get("transcript_path", "")
 
-    # Prefer last_assistant_message — it's exactly the message that triggered this Stop hook,
-    # so there's no replay-history risk and no transcript-flush race.
-    last_msg = input_data.get("last_assistant_message")
+    # Content comes from last_assistant_message (authoritative for THIS turn).
+    # Reading from the transcript's tail is unsafe: when Claude Code resumes an
+    # idle session, yesterday's last message still sits at the end of the
+    # transcript, and we'd happily replay it as if it were the current reply.
+    # The transcript is used only to find the matching UUID for dedup.
     full_text = ""
-
+    last_msg = input_data.get("last_assistant_message")
     if isinstance(last_msg, str) and last_msg.strip():
         full_text = last_msg
-        debug(f"using last_assistant_message (str, {len(full_text)} chars)")
     elif isinstance(last_msg, dict):
-        content = last_msg.get("content")
-        if content is None:
-            content = last_msg.get("message", {}).get("content", "")
+        content = last_msg.get("content") or last_msg.get("message", {}).get("content", "")
         if isinstance(content, list):
             full_text = " ".join(
                 p.get("text", "") for p in content
@@ -172,37 +191,61 @@ def main():
             )
         elif isinstance(content, str):
             full_text = content
-        debug(f"using last_assistant_message (dict, {len(full_text)} chars)")
-    else:
-        # Fallback: poll the transcript for the latest assistant message.
-        debug("no last_assistant_message; falling back to transcript")
-        for attempt in range(8):
-            messages = get_last_assistant_messages(transcript_path)
-            if messages:
-                content = messages[-1].get("message", {}).get("content", "")
-                if isinstance(content, list):
-                    full_text = " ".join(
-                        p.get("text", "") for p in content
-                        if isinstance(p, dict) and p.get("type") == "text"
-                    )
-                elif isinstance(content, str):
-                    full_text = content
-                if full_text:
-                    break
-            time.sleep(0.15 if attempt < 3 else 0.3)
 
     if not full_text:
-        debug("no text to speak")
+        debug("no last_assistant_message content, exit")
         sys.exit(0)
 
-    voice_chunks = extract_voice_tags(full_text)
-    debug(f"{len(voice_chunks)} voice chunks")
+    # Find the transcript message whose text matches the hook payload, so we
+    # can key dedup against flush-voice's mid-turn flushes. If nothing matches,
+    # skip playback — that's safer than replaying a stale entry or duplicating
+    # chunks that already played mid-turn.
+    def _norm(s):
+        return re.sub(r"\s+", " ", s).strip()
 
-    for chunk in voice_chunks:
+    target = _norm(full_text)
+    msg_uuid = ""
+    for attempt in range(8):
+        messages = get_last_assistant_messages(transcript_path)
+        for m in reversed(messages[-30:]):
+            m_content = m.get("message", {}).get("content", "")
+            if isinstance(m_content, list):
+                m_text = " ".join(
+                    p.get("text", "") for p in m_content
+                    if isinstance(p, dict) and p.get("type") == "text"
+                )
+            elif isinstance(m_content, str):
+                m_text = m_content
+            else:
+                m_text = ""
+            if m_text and _norm(m_text) == target:
+                msg_uuid = m.get("uuid", "")
+                break
+        if msg_uuid:
+            debug(f"matched transcript msg {msg_uuid[:8]} on attempt {attempt} ({len(full_text)} chars)")
+            break
+        time.sleep(0.15 if attempt < 3 else 0.3)
+
+    if not msg_uuid:
+        debug("no transcript match for current turn; skipping (likely stale resumed session)")
+        sys.exit(0)
+
+    chunks = extract_voice_tags(full_text)
+    flushed = load_flushed()
+    already = flushed.get(msg_uuid, 0) if msg_uuid else 0
+    new_chunks = chunks[already:]
+
+    debug(f"total={len(chunks)} flushed={already} new={len(new_chunks)}")
+
+    for chunk in new_chunks:
         ok = send_to_broker(chunk, voice=voice, session_id=session_id, pid=pid)
         debug(f"  sent '{chunk[:60]}' ok={ok}")
 
-    print(json.dumps({"spoken": len(voice_chunks)}))
+    if msg_uuid:
+        flushed[msg_uuid] = len(chunks)
+        save_flushed(flushed)
+
+    print(json.dumps({"spoken": len(new_chunks)}))
     sys.exit(0)
 
 
