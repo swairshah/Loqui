@@ -13,6 +13,12 @@ DRY_RUN=0
 SKIP_MCP=0
 SKIP_BREW=0
 SCOPE="user"
+INTERACTIVE="auto"
+TARGETS="all"
+
+DO_CLAUDE=1
+DO_CODEX=1
+DO_PI=1
 
 usage() {
   cat <<'EOF'
@@ -21,6 +27,11 @@ Usage: scripts/setup-agent-extensions.sh [options]
 Sets up Loqui speech integrations for Claude Code, Codex, and Pi.
 
 Options:
+  --interactive   Always run interactive setup prompts.
+  --non-interactive
+                  Never prompt; rely on flags/defaults.
+  --targets LIST  Comma-separated targets: all,claude-code,codex,pi
+                  (aliases: claude,claudecode).
   --dry-run       Print what would change without writing configs or installing.
   --skip-mcp      Skip Loqui MCP registration for explicit agent tools.
   --skip-brew     Do not install the Loqui Homebrew formula if loqui is missing.
@@ -31,6 +42,20 @@ EOF
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --interactive)
+      INTERACTIVE="1"
+      ;;
+    --non-interactive)
+      INTERACTIVE="0"
+      ;;
+    --targets)
+      if [[ $# -lt 2 ]]; then
+        echo "Missing value for --targets" >&2
+        exit 2
+      fi
+      TARGETS="$2"
+      shift
+      ;;
     --dry-run)
       DRY_RUN=1
       ;;
@@ -101,9 +126,193 @@ backup_file() {
   log "Backed up $file to $backup"
 }
 
+normalize_target() {
+  local value
+  value="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  case "$value" in
+    all)
+      printf 'all'
+      ;;
+    claude|claude-code|claudecode)
+      printf 'claude'
+      ;;
+    codex)
+      printf 'codex'
+      ;;
+    pi)
+      printf 'pi'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+apply_targets() {
+  local raw="$1"
+  local normalized item
+
+  DO_CLAUDE=0
+  DO_CODEX=0
+  DO_PI=0
+
+  IFS=',' read -r -a items <<< "$raw"
+  for item in "${items[@]}"; do
+    item="$(printf '%s' "$item" | xargs)"
+    [[ -z "$item" ]] && continue
+
+    if ! normalized="$(normalize_target "$item")"; then
+      echo "Invalid target in --targets: $item" >&2
+      exit 2
+    fi
+
+    if [[ "$normalized" == "all" ]]; then
+      DO_CLAUDE=1
+      DO_CODEX=1
+      DO_PI=1
+      return 0
+    fi
+
+    case "$normalized" in
+      claude) DO_CLAUDE=1 ;;
+      codex) DO_CODEX=1 ;;
+      pi) DO_PI=1 ;;
+    esac
+  done
+
+  if [[ "$DO_CLAUDE" == "0" && "$DO_CODEX" == "0" && "$DO_PI" == "0" ]]; then
+    echo "No valid targets selected. Use --targets all,claude-code,codex,pi" >&2
+    exit 2
+  fi
+}
+
+prompt_yes_no() {
+  local question="$1"
+  local default="$2"
+  local reply
+
+  while true; do
+    if [[ "$default" == "y" ]]; then
+      read -r -p "$question [Y/n] " reply || return 1
+      reply="${reply:-y}"
+    else
+      read -r -p "$question [y/N] " reply || return 1
+      reply="${reply:-n}"
+    fi
+
+    case "$(printf '%s' "$reply" | tr '[:upper:]' '[:lower:]')" in
+      y|yes) return 0 ;;
+      n|no) return 1 ;;
+      *) echo "Please answer y or n." ;;
+    esac
+  done
+}
+
+interactive_setup() {
+  local choice
+
+  log ""
+  log "Loqui setup"
+  log "Choose what to configure:"
+  log "  1) All (Claude Code + Codex + Pi)"
+  log "  2) Claude Code"
+  log "  3) Codex"
+  log "  4) Pi"
+  log "  5) Custom mix"
+
+  while true; do
+    read -r -p "Select an option [1-5] (default 1): " choice || break
+    choice="${choice:-1}"
+    case "$choice" in
+      1)
+        DO_CLAUDE=1
+        DO_CODEX=1
+        DO_PI=1
+        break
+        ;;
+      2)
+        DO_CLAUDE=1
+        DO_CODEX=0
+        DO_PI=0
+        break
+        ;;
+      3)
+        DO_CLAUDE=0
+        DO_CODEX=1
+        DO_PI=0
+        break
+        ;;
+      4)
+        DO_CLAUDE=0
+        DO_CODEX=0
+        DO_PI=1
+        break
+        ;;
+      5)
+        if prompt_yes_no "Set up Claude Code?" "y"; then DO_CLAUDE=1; else DO_CLAUDE=0; fi
+        if prompt_yes_no "Set up Codex?" "y"; then DO_CODEX=1; else DO_CODEX=0; fi
+        if prompt_yes_no "Set up Pi?" "y"; then DO_PI=1; else DO_PI=0; fi
+        if [[ "$DO_CLAUDE" == "0" && "$DO_CODEX" == "0" && "$DO_PI" == "0" ]]; then
+          echo "You must choose at least one target."
+          continue
+        fi
+        break
+        ;;
+      *)
+        echo "Please choose 1, 2, 3, 4, or 5."
+        ;;
+    esac
+  done
+
+  if [[ "$DO_CLAUDE" == "1" ]]; then
+    while true; do
+      read -r -p "Claude plugin scope (user/project/local) [${SCOPE}]: " choice || break
+      choice="${choice:-$SCOPE}"
+      case "$choice" in
+        user|project|local)
+          SCOPE="$choice"
+          break
+          ;;
+        *)
+          echo "Scope must be user, project, or local."
+          ;;
+      esac
+    done
+  fi
+
+  if prompt_yes_no "Register Loqui MCP server as part of setup?" "$([[ "$SKIP_MCP" == "1" ]] && echo n || echo y)"; then
+    SKIP_MCP=0
+  else
+    SKIP_MCP=1
+  fi
+
+  if prompt_yes_no "Auto-install Loqui with Homebrew if missing?" "$([[ "$SKIP_BREW" == "1" ]] && echo n || echo y)"; then
+    SKIP_BREW=0
+  else
+    SKIP_BREW=1
+  fi
+
+  log ""
+  log "Summary:"
+  log "  Claude Code: $([[ "$DO_CLAUDE" == "1" ]] && echo yes || echo no)"
+  log "  Codex:       $([[ "$DO_CODEX" == "1" ]] && echo yes || echo no)"
+  log "  Pi:          $([[ "$DO_PI" == "1" ]] && echo yes || echo no)"
+  log "  Claude scope: $SCOPE"
+  log "  Register MCP: $([[ "$SKIP_MCP" == "1" ]] && echo no || echo yes)"
+  log "  Brew install fallback: $([[ "$SKIP_BREW" == "1" ]] && echo no || echo yes)"
+  log ""
+}
+
 check_paths() {
   local missing=0
-  for path in "$CLAUDE_PLUGIN_DIR" "$CODEX_TALK_DIR" "$PI_TALK_DIR" "$LOQUI_MCP_ENTRY"; do
+  local required=()
+
+  [[ "$DO_CLAUDE" == "1" ]] && required+=("$CLAUDE_PLUGIN_DIR")
+  [[ "$DO_CODEX" == "1" ]] && required+=("$CODEX_TALK_DIR")
+  [[ "$DO_PI" == "1" ]] && required+=("$PI_TALK_DIR")
+  [[ "$SKIP_MCP" == "0" ]] && required+=("$LOQUI_MCP_ENTRY")
+
+  for path in "${required[@]}"; do
     if [[ ! -e "$path" ]]; then
       warn "missing expected path: $path"
       missing=1
@@ -142,6 +351,12 @@ ensure_loqui() {
 }
 
 install_claude() {
+  if [[ "$DO_CLAUDE" != "1" ]]; then
+    log ""
+    log "[2/6] Skipping Claude Code plugin (not selected)"
+    return 0
+  fi
+
   log ""
   log "[2/6] Setting up Claude Code plugin"
 
@@ -165,6 +380,12 @@ install_claude() {
 }
 
 install_codex() {
+  if [[ "$DO_CODEX" != "1" ]]; then
+    log ""
+    log "[3/6] Skipping Codex setup (not selected)"
+    return 0
+  fi
+
   log ""
   log "[3/6] Setting up Codex hooks and voice instructions"
 
@@ -401,6 +622,12 @@ NODE
 }
 
 install_pi() {
+  if [[ "$DO_PI" != "1" ]]; then
+    log ""
+    log "[4/6] Skipping Pi extension (not selected)"
+    return 0
+  fi
+
   log ""
   log "[4/6] Setting up Pi extension"
 
@@ -420,12 +647,13 @@ install_pi() {
 
 install_mcp() {
   log ""
-  log "[5/6] Registering Loqui MCP"
 
   if [[ "$SKIP_MCP" == "1" ]]; then
-    log "Skipped MCP registration"
+    log "[5/6] Skipping Loqui MCP registration"
     return 0
   fi
+
+  log "[5/6] Registering Loqui MCP"
 
   if ! have node; then
     warn "node is required for Loqui MCP; skipping MCP registration"
@@ -442,14 +670,38 @@ install_mcp() {
 finish() {
   log ""
   log "[6/6] Done"
-  log "Restart Claude Code, Codex, and Pi sessions so they reload plugins/hooks."
+
+  local selected=()
+  [[ "$DO_CLAUDE" == "1" ]] && selected+=("Claude Code")
+  [[ "$DO_CODEX" == "1" ]] && selected+=("Codex")
+  [[ "$DO_PI" == "1" ]] && selected+=("Pi")
+
+  if [[ ${#selected[@]} -gt 0 ]]; then
+    log "Configured: ${selected[*]}"
+    log "Restart selected tools so they reload plugins/hooks."
+  fi
+
   log ""
   log "Quick tests:"
-  log "  Claude Code: /claude-talk:tts-status"
-  log "  Codex: start a new turn that includes <voice>Hello from Codex.</voice>"
-  log "  Pi: /tts-status"
+  [[ "$DO_CLAUDE" == "1" ]] && log "  Claude Code: /claude-talk:tts-status"
+  [[ "$DO_CODEX" == "1" ]] && log "  Codex: start a new turn that includes <voice>Hello from Codex.</voice>"
+  [[ "$DO_PI" == "1" ]] && log "  Pi: /tts-status"
   log "  Loqui CLI: loqui say \"Hello from Loqui\""
 }
+
+apply_targets "$TARGETS"
+
+if [[ "$INTERACTIVE" == "auto" ]]; then
+  if [[ -t 0 ]]; then
+    INTERACTIVE="1"
+  else
+    INTERACTIVE="0"
+  fi
+fi
+
+if [[ "$INTERACTIVE" == "1" ]]; then
+  interactive_setup
+fi
 
 check_paths
 ensure_loqui
