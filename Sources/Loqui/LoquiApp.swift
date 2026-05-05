@@ -150,6 +150,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         syncServerEnabledSwitchState()
         if serverEnabled {
             startLocalBroker()
+            prewarmPocketTTSResources(modelDirectory: getModelCachePath(), preferredVoice: selectedVoice)
         } else {
             updateStatusIcon(running: false)
         }
@@ -699,6 +700,35 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let pocketTTSDir = appSupport.appendingPathComponent("Loqui").appendingPathComponent("FluidAudio")
         try? FileManager.default.createDirectory(at: pocketTTSDir, withIntermediateDirectories: true)
         return pocketTTSDir
+    }
+
+    private func prewarmPocketTTSResources(modelDirectory: URL, preferredVoice: String) {
+        let voices = ([preferredVoice] + TTSClient.availableVoices).reduce(into: [String]()) { result, voice in
+            let trimmed = voice.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, !result.contains(trimmed) else { return }
+            result.append(trimmed)
+        }
+
+        Task.detached(priority: .utility) {
+            do {
+                let languageRoot = try await PocketTtsResourceDownloader.ensureModels(
+                    language: .english,
+                    directory: modelDirectory
+                )
+
+                for voice in voices {
+                    _ = try await PocketTtsResourceDownloader.ensureVoice(
+                        voice,
+                        language: .english,
+                        languageRoot: languageRoot
+                    )
+                }
+
+                print("Loqui: PocketTTS resources ready")
+            } catch {
+                print("Loqui: PocketTTS resource warmup failed: \(error.localizedDescription)")
+            }
+        }
     }
     
     func startServer() {
