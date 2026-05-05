@@ -18,6 +18,7 @@ mkdir -p "$APP_DIR/Contents/Resources"
 
 # Copy Swift executable
 cp .build/release/Loqui "$APP_DIR/Contents/MacOS/"
+cp .build/release/loqui-cli "$APP_DIR/Contents/MacOS/"
 
 echo "📥 FluidAudio PocketTTS CoreML models will download on first synthesis and cache in Application Support."
 
@@ -72,6 +73,11 @@ SIGNING_IDENTITY="Developer ID Application: Swair Rajesh Shah (8B9YURJS4G)"
 
 echo "🔏 Signing app..."
 
+# Sign the bundled CLI before signing the app bundle. The file is named
+# loqui-cli inside Contents/MacOS to avoid colliding with Loqui on
+# case-insensitive macOS filesystems; Homebrew links it as `loqui`.
+codesign --force --options runtime --sign "$SIGNING_IDENTITY" "$APP_DIR/Contents/MacOS/loqui-cli"
+
 # Sign the main app
 codesign --force --options runtime --sign "$SIGNING_IDENTITY" "$APP_DIR"
 
@@ -80,7 +86,8 @@ codesign --verify --deep --strict "$APP_DIR" && echo "  ✓ Signature valid" || 
 
 echo ""
 echo "✅ Built: $APP_DIR"
-echo "✅ Built: .build/release/loqui-cli (install as loqui)"
+echo "✅ Bundled: $APP_DIR/Contents/MacOS/loqui-cli (Homebrew installs as loqui)"
+echo "✅ Built: .build/release/loqui-cli"
 echo ""
 echo "To run the app:"
 echo "  open $APP_DIR"

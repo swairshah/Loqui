@@ -20,7 +20,7 @@ Example:
 
 1. Update `CFBundleShortVersionString` in `scripts/build-app.sh`
 2. Build Loqui + `loqui`
-3. Bundle `pocket-tts-cli` + model files into `.build/Loqui.app`
+3. Bundle the signed `loqui-cli` helper into `.build/Loqui.app`
 4. Sign the app
 5. Zip to `dist/Loqui-<version>.zip`
 6. Notarize with Apple (`xcrun notarytool`) and staple ticket
@@ -104,8 +104,12 @@ The package is dependency-free and runs directly from `src/index.js`.
 After `brew install loqui`:
 
 1. Open Loqui.app (menu bar app)
-2. In Pi, install extension:
+2. Confirm the CLI is linked:
+   ```bash
+   loqui status
+   ```
+3. In Pi, install extension:
    ```bash
    pi install npm:@swairshah/pi-talk
    ```
-3. Restart Pi if needed so extension loads
+4. Restart Pi if needed so extension loads
