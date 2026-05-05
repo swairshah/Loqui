@@ -901,6 +901,53 @@ private struct BrokerResponse: Encodable {
     }
 }
 
+private struct SpeechCleanupRule: Codable, Identifiable, Equatable {
+    var id: UUID
+    var find: String
+    var replaceWith: String
+    var enabled: Bool
+
+    init(id: UUID = UUID(), find: String = "", replaceWith: String = "", enabled: Bool = true) {
+        self.id = id
+        self.find = find
+        self.replaceWith = replaceWith
+        self.enabled = enabled
+    }
+}
+
+private enum SpeechTextSanitizer {
+    static let customRulesKey = "speechCleanupRules"
+
+    static func sanitize(_ text: String) -> String {
+        var clean = applyBuiltInRules(to: text)
+
+        for rule in customRules() where rule.enabled {
+            guard !rule.find.isEmpty else { continue }
+            clean = clean.replacingOccurrences(of: rule.find, with: rule.replaceWith)
+        }
+
+        return clean.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func applyBuiltInRules(to text: String) -> String {
+        text.replacingOccurrences(of: "’", with: "'")
+    }
+
+    static func customRules() -> [SpeechCleanupRule] {
+        guard let data = UserDefaults.standard.data(forKey: customRulesKey) else {
+            return []
+        }
+
+        return (try? JSONDecoder().decode([SpeechCleanupRule].self, from: data)) ?? []
+    }
+
+    static func saveCustomRules(_ rules: [SpeechCleanupRule]) {
+        if let data = try? JSONEncoder().encode(rules) {
+            UserDefaults.standard.set(data, forKey: customRulesKey)
+        }
+    }
+}
+
 private enum UnixSocketListener {
     static func make(path: String) throws -> NWListener {
         try LoquiSocketPaths.prepareDirectory()
@@ -1429,8 +1476,8 @@ final class SpeechPlaybackCoordinator {
                  sourceApp: String?,
                  sessionId: String?,
                  pid: Int?) -> Int {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
+        let cleanText = SpeechTextSanitizer.sanitize(text)
+        guard !cleanText.isEmpty else {
             return state().pending
         }
 
@@ -1440,7 +1487,7 @@ final class SpeechPlaybackCoordinator {
             let resolvedVoice = resolveVoiceForQueueLocked(requestedVoice: voice, queueKey: key)
 
             let historyEntryId = RequestHistoryStore.shared.add(
-                text: trimmed,
+                text: cleanText,
                 voice: resolvedVoice,
                 sourceApp: sourceApp,
                 sessionId: sessionId,
@@ -1449,7 +1496,7 @@ final class SpeechPlaybackCoordinator {
 
             let job = SpeechJob(
                 historyEntryId: historyEntryId,
-                text: trimmed,
+                text: cleanText,
                 voice: resolvedVoice,
                 sourceApp: sourceApp,
                 sessionId: sessionId,
@@ -1927,7 +1974,13 @@ final class LocalSpeechBroker {
     }
 
     private func synthesize(request: BrokerRequest, response: SynthesisResponse, on connection: NWConnection) {
-        guard let text = request.text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
+        guard let requestText = request.text else {
+            send(response: .failure("Missing text"), on: connection)
+            return
+        }
+
+        let text = SpeechTextSanitizer.sanitize(requestText)
+        guard !text.isEmpty else {
             send(response: .failure("Missing text"), on: connection)
             return
         }
@@ -2072,6 +2125,11 @@ struct SettingsView: View {
             GeneralSettingsView()
                 .tabItem {
                     Text("General")
+                }
+
+            CleanupSettingsView()
+                .tabItem {
+                    Text("Cleanup")
                 }
 
             HistoryView()
@@ -2267,6 +2325,105 @@ struct GeneralSettingsView: View {
         }
 
         return samples
+    }
+}
+
+struct CleanupSettingsView: View {
+    @State private var rules = SpeechTextSanitizer.customRules()
+    @State private var previewText = "I’ll quickly read it back."
+
+    var body: some View {
+        Form {
+            Section("Built-in Rules") {
+                HStack {
+                    Text("Curly apostrophe")
+                    Spacer()
+                    Text("’")
+                        .font(.system(.body, design: .monospaced))
+                    Image(systemName: "arrow.right")
+                        .foregroundColor(.secondary)
+                    Text("'")
+                        .font(.system(.body, design: .monospaced))
+                    Text("Always on")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            Section("Custom Rules") {
+                if rules.isEmpty {
+                    Text("No custom rules")
+                        .foregroundColor(.secondary)
+                }
+
+                ForEach($rules) { $rule in
+                    HStack(spacing: 8) {
+                        Toggle("Enabled", isOn: $rule.enabled)
+                            .labelsHidden()
+
+                        TextField("Find", text: $rule.find)
+                            .textFieldStyle(.roundedBorder)
+
+                        Image(systemName: "arrow.right")
+                            .foregroundColor(.secondary)
+
+                        TextField("Replace", text: $rule.replaceWith)
+                            .textFieldStyle(.roundedBorder)
+
+                        Button {
+                            removeRule(rule.id)
+                        } label: {
+                            Image(systemName: "trash")
+                        }
+                        .buttonStyle(.plain)
+                        .help("Remove rule")
+                    }
+                }
+
+                Button {
+                    rules.append(SpeechCleanupRule())
+                } label: {
+                    Label("Add Rule", systemImage: "plus")
+                }
+            }
+
+            Section("Preview") {
+                TextField("Sample text", text: $previewText)
+                    .textFieldStyle(.roundedBorder)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Cleaned")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Text(cleanedPreview)
+                        .font(.callout)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .onAppear {
+            rules = SpeechTextSanitizer.customRules()
+        }
+        .onChange(of: rules) {
+            SpeechTextSanitizer.saveCustomRules(rules)
+        }
+    }
+
+    private var cleanedPreview: String {
+        var clean = SpeechTextSanitizer.applyBuiltInRules(to: previewText)
+
+        for rule in rules where rule.enabled {
+            guard !rule.find.isEmpty else { continue }
+            clean = clean.replacingOccurrences(of: rule.find, with: rule.replaceWith)
+        }
+
+        return clean
+    }
+
+    private func removeRule(_ id: UUID) {
+        rules.removeAll { $0.id == id }
     }
 }
 
