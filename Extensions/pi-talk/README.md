@@ -47,6 +47,17 @@ Once installed, Pi will automatically speak `<voice>` tagged content in its resp
 
 Press **Cmd+.** to stop speech at any time (requires Loqui.app running).
 
+### Inbox smoke test helper
+
+If you know the Pi PID shown in the status bar as `πid<PID>`, you can inject one message into that session using either the numeric PID or the full `πid<PID>` form:
+
+```bash
+./Extensions/pi-talk/scripts/send-to-pi.sh <PID> "Please reply with: inbox smoke test passed"
+./Extensions/pi-talk/scripts/send-to-pi.sh πid<PID> "Please reply with: inbox smoke test passed"
+```
+
+The helper requires `~/.pi/agent/pitalk-inbox/<PID>/` to already exist. If it does not, it fails with a clear error instead of creating the inbox.
+
 ## How it works
 
 1. The extension injects a system prompt that teaches Pi to use `<voice>` tags
